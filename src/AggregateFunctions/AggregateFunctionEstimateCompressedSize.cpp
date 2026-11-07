@@ -31,9 +31,7 @@
 #include <base/types.h>
 #include <Common/Arena.h>
 #include <Common/Exception.h>
-#include <Common/StringUtils.h>
 #include <Common/assert_cast.h>
-#include <Poco/String.h>
 
 namespace DB
 {
@@ -106,15 +104,14 @@ struct Conversion
 /// The parameters of the function, and the settings of the server and of the query the writer would use.
 struct EstimateCompressedSizeConfig
 {
+    DataTypePtr target_type;
     std::optional<String> codec;
     std::optional<UInt64> block_size_bytes;
-    DataTypePtr target_type;
     CompressedColumnSizeEstimator::WriterSettings writer_settings;
 };
 
-/** Estimates the compressed size of a column stored as a given type: the rows are converted to the `target_type` parameter
-  * (else kept in the type they arrive as), written as MergeTree writes a column of a wide part, and the compressed bytes are
-  * read off the writer.
+/** Estimates the compressed size of a column stored as a given type: the rows are converted to the `target_type` parameter,
+  * written as MergeTree writes a column of a wide part, and the compressed bytes are read off the writer.
   */
 class AggregateFunctionEstimateCompressedSize final
     : public IAggregateFunctionDataHelper<AggregateFunctionEstimateCompressedSizeData, AggregateFunctionEstimateCompressedSize>
@@ -123,7 +120,7 @@ private:
     const EstimateCompressedSizeConfig config;
     /// The type the rows arrive as.
     const DataTypePtr argument_type;
-    /// The type the column is measured as: the `target_type` parameter when given, else the type of the argument.
+    /// The type the column is measured as: the `target_type` parameter.
     const DataTypePtr estimated_type;
     /// The conversion of the rows from `argument_type` to `estimated_type`, where they differ.
     const std::optional<Conversion> conversion;
@@ -388,7 +385,7 @@ public:
         : IAggregateFunctionDataHelper(arguments, params, std::make_shared<DataTypeUInt64>())
         , config(std::move(config_))
         , argument_type(arguments[0])
-        , estimated_type(config.target_type ? config.target_type : argument_type)
+        , estimated_type(config.target_type)
         , conversion(estimated_type->equals(*argument_type) ? std::nullopt : std::optional(createCast(argument_type, estimated_type)))
         , buffer_partial_granules(!isSplitIndependent(*estimated_type))
         , default_codec(config.writer_settings.default_codec)
@@ -517,43 +514,29 @@ public:
     }
 };
 
-/// The parameters, in any order: a number is the compressed block size, a string that names a data type is the target type, any
-/// other string the codec. No codec is named like a data type.
+/// The first parameter is the target type; the others, in any order, a codec (a string) and the compressed block size (a number).
 EstimateCompressedSizeConfig parseParameters(const String & name, const Array & parameters)
 {
+    if (parameters.empty() || parameters[0].getType() != Field::Types::String)
+        throw Exception(
+            ErrorCodes::BAD_QUERY_PARAMETER,
+            "Aggregate function {} requires the name of the target type as its first parameter, for example {}('LowCardinality(String)')(column)",
+            name,
+            name);
     if (parameters.size() > 3)
         throw Exception(ErrorCodes::UNKNOWN_QUERY_PARAMETER, "Aggregate function {} accepts at most three parameters", name);
 
-    const auto & type_factory = DataTypeFactory::instance();
     EstimateCompressedSizeConfig config;
-    for (const auto & param : parameters)
+    config.target_type = DataTypeFactory::instance().get(parameters[0].safeGet<String>());
+    for (size_t i = 1; i < parameters.size(); ++i)
     {
+        const auto & param = parameters[i];
         if (param.getType() == Field::Types::String)
         {
-            const String & value = param.safeGet<String>();
-
-            if (DataTypePtr type = type_factory.tryGet(value))
-            {
-                if (config.target_type)
-                    throw Exception(
-                        ErrorCodes::BAD_QUERY_PARAMETER,
-                        "Multiple data type parameters specified for {}. Expected at most one data type (target_type) parameter",
-                        name);
-                config.target_type = std::move(type);
-                continue;
-            }
-
-            /// A string starting with the name of a type family is a mistyped type: report its error, not an unknown codec.
-            const String family(value.begin(), std::find_if_not(value.begin(), value.end(), isWordCharASCII));
-            if (type_factory.hasNameOrAlias(family) || type_factory.hasNameOrAlias(Poco::toLower(family)))
-                type_factory.get(value);
-
             if (config.codec.has_value())
                 throw Exception(
-                    ErrorCodes::BAD_QUERY_PARAMETER,
-                    "Multiple codec parameters specified for {}. Expected at most one string that is not a data type (codec)",
-                    name);
-            config.codec = value;
+                    ErrorCodes::BAD_QUERY_PARAMETER, "Multiple codec parameters specified for {}. Expected at most one codec parameter", name);
+            config.codec = param.safeGet<String>();
         }
         else if (param.getType() == Field::Types::UInt64)
         {
@@ -581,7 +564,7 @@ EstimateCompressedSizeConfig parseParameters(const String & name, const Array & 
         {
             throw Exception(
                 ErrorCodes::UNKNOWN_QUERY_PARAMETER,
-                "Invalid parameter type for {}. Expected String (codec or target_type) and/or UInt64 (block_size_bytes)",
+                "Invalid parameter type for {}. Expected String (codec) and/or UInt64 (block_size_bytes) after the target type",
                 name);
         }
     }
@@ -609,11 +592,11 @@ void registerAggregateFunctionEstimateCompressedSize(AggregateFunctionFactory & 
     FunctionDocumentation::Description description = R"(
 Estimates the size, in bytes, that a column takes on disk when it is stored as a given type, without compressing it.
 
-The rows are converted to the `target_type` parameter when it is given, as `accurateCast` does: a value that does not fit the target type is an error, also when the target type is `Nullable`. Without it, the column is estimated as the type the function receives it in. Like every aggregate function, it receives a `LowCardinality` column as its dictionary type, so `estimateCompressedSize(lc)` estimates `lc` as a plain column; to estimate the dictionary encoding, name it: `estimateCompressedSize('LowCardinality(String)')(lc)`.
+The rows are converted to the `target_type` parameter, as `accurateCast` does: a value that does not fit the target type is an error, also when the target type is `Nullable`. The type is always named, so every estimate says which representation it measures: `estimateCompressedSize('String')(s)` and `estimateCompressedSize('LowCardinality(String)')(s)` are the two sizes the same values would take, and the type of the argument itself plays no part (an aggregate function receives a `LowCardinality` column as its dictionary type).
 
 The estimate follows the layout of a MergeTree wide part: every substream of the column (the dictionary and the indexes of a `LowCardinality` column, the null map of a `Nullable` column, the sizes of an `Array` column, the lengths of a `String` column) is compressed on its own; the codec applies to the data substreams, while the structural substreams keep only its generic codecs, as `CODEC(...)` on a table column does. The rows are serialized one granule at a time, whatever the size of the blocks the query reads, and a compressed block ends at a granule boundary once it holds `min_compress_block_size` bytes, as in a part.
 
-The result is the number of bytes the column would take on disk (`column_data_compressed_bytes` in `system.parts_columns` for an existing column), so the estimates of one column for different target types and codecs are directly comparable: the smaller, the better. A sparse column stays sparse through a conversion that keeps its default value the default (`UInt64` to `Int64`), and is measured dense when the target type cannot be stored sparse (`LowCardinality(String)`).
+The result is the number of bytes the column would take on disk (`column_data_compressed_bytes` in `system.parts_columns` for an existing column stored as that type), so the estimates of one column for different target types and codecs are directly comparable: the smaller, the better. A sparse column stays sparse through a conversion that keeps its default value the default (`UInt64` to `Int64`), and is measured dense when the target type cannot be stored sparse (`LowCardinality(String)`).
 
 The function has no table, so what the writer takes from a table it takes from the server's MergeTree settings (the `merge_tree` section of the configuration): the serialization versions of `String`, `Nullable` and `Map`, the layouts of `Dynamic`, `JSON` and `Variant` as a merged part stores them, the map buckets, `index_granularity`, `index_granularity_bytes`, `min_compress_block_size`, `max_compress_block_size`, and the adaptive buffers of the substreams of `Dynamic` and `JSON`. Without the `codec` parameter, the codec is the one the server gives a large merged part: the `default_compression_codec` MergeTree setting when it is set, else the `compression` section of the configuration, else `ZSTD(3)`. From the query it takes `low_cardinality_max_dictionary_size`, `low_cardinality_use_single_dictionary_for_part`, and the compressed block sizes when the MergeTree settings leave them unset. The settings of a particular table are not known to the function, and the granule size is estimated from this column alone, while a table sizes its granules by all its columns.
 
@@ -626,14 +609,14 @@ Without the `codec` parameter, the result depends on the default compression cod
 See [Column Compression Codecs](/reference/statements/create/table#column_compression_codec).
 </Note>
     )";
-    FunctionDocumentation::Syntax syntax = "estimateCompressedSize([codec][, block_size_bytes][, target_type])(column)";
+    FunctionDocumentation::Syntax syntax = "estimateCompressedSize(target_type[, codec][, block_size_bytes])(column)";
     FunctionDocumentation::Arguments arguments = {
         {"column", "Column of any type.", {"Any"}}
     };
     FunctionDocumentation::Parameters parameters = {
-        {"codec", "String containing a compression codec or multiple comma-separated codecs in a single string.", {"String"}},
-        {"block_size_bytes", "Size of a compressed block in bytes. When given, a block ends when it reaches this size, as if both [`max_compress_block_size`](/reference/settings/merge-tree-settings/max#max_compress_block_size) and [`min_compress_block_size`](/reference/settings/merge-tree-settings/min#min_compress_block_size) were set to it. When omitted, the server's settings apply (1048576 and 65536 bytes by default): a block ends at a granule boundary once it holds `min_compress_block_size` bytes, and when it reaches `max_compress_block_size`. Maximum allowed value is 256 MiB (268435456 bytes).", {"UInt64"}},
-        {"target_type", "Name of a data type. The column is estimated as if it were stored as this type: its rows are converted to it, as `accurateCast` does, and compressed with the codec. When omitted, the column is estimated as the type the function receives it in. The parameters can be given in any order: a string that names a data type is the target type, any other string is the codec.", {"String"}}
+        {"target_type", "Name of a data type, the first parameter. The column is estimated as if it were stored as this type: its rows are converted to it, as `accurateCast` does, and compressed with the codec. The type of the column itself gives its size as it is.", {"String"}},
+        {"codec", "String containing a compression codec or multiple comma-separated codecs in a single string. The codec and the block size can be given in any order after the type.", {"String"}},
+        {"block_size_bytes", "Size of a compressed block in bytes. When given, a block ends when it reaches this size, as if both [`max_compress_block_size`](/reference/settings/merge-tree-settings/max#max_compress_block_size) and [`min_compress_block_size`](/reference/settings/merge-tree-settings/min#min_compress_block_size) were set to it. When omitted, the server's settings apply (1048576 and 65536 bytes by default): a block ends at a granule boundary once it holds `min_compress_block_size` bytes, and when it reaches `max_compress_block_size`. Maximum allowed value is 256 MiB (268435456 bytes).", {"UInt64"}}
     };
     FunctionDocumentation::ReturnedValue returned_value = {"Returns the estimated compressed size of the column in bytes.", {"UInt64"}};
     FunctionDocumentation::Examples examples = {
@@ -653,8 +636,8 @@ SELECT concat('category_', toString(number % 50)) FROM system.numbers LIMIT 100_
 
 -- `LowCardinality(String)` would store this column in about 40 times fewer bytes than `String`.
 SELECT
-    estimateCompressedSize('LZ4')(s) AS as_string,
-    estimateCompressedSize('LZ4', 'LowCardinality(String)')(s) AS as_low_cardinality
+    estimateCompressedSize('String', 'LZ4')(s) AS as_string,
+    estimateCompressedSize('LowCardinality(String)', 'LZ4')(s) AS as_low_cardinality
 FROM compression_estimate_strings
         )",
         R"(
@@ -669,10 +652,10 @@ FROM compression_estimate_strings
 -- `IPv6` stores the same addresses in 16 bytes instead of 4: with `LZ4` the 12 constant bytes of every address cost space, with
 -- `ZSTD` they almost compress away.
 SELECT
-    estimateCompressedSize('LZ4')(ip) AS lz4_as_ipv4,
-    estimateCompressedSize('LZ4', 'IPv6')(ip) AS lz4_as_ipv6,
-    estimateCompressedSize('ZSTD')(ip) AS zstd_as_ipv4,
-    estimateCompressedSize('ZSTD', 'IPv6')(ip) AS zstd_as_ipv6
+    estimateCompressedSize('IPv4', 'LZ4')(ip) AS lz4_as_ipv4,
+    estimateCompressedSize('IPv6', 'LZ4')(ip) AS lz4_as_ipv6,
+    estimateCompressedSize('IPv4', 'ZSTD')(ip) AS zstd_as_ipv4,
+    estimateCompressedSize('IPv6', 'ZSTD')(ip) AS zstd_as_ipv6
 FROM (SELECT toIPv4(number * 7919) AS ip FROM numbers(100000))
         )",
         R"(
@@ -687,7 +670,7 @@ FROM (SELECT toIPv4(number * 7919) AS ip FROM numbers(100000))
 -- The estimate takes the codec of the column; without the codec parameter it would take the codec the server gives a large
 -- merged part, which a small part may not have been written with.
 SELECT
-    (SELECT estimateCompressedSize('LZ4')(s) FROM compression_estimate_strings) AS estimate,
+    (SELECT estimateCompressedSize('String', 'LZ4')(s) FROM compression_estimate_strings) AS estimate,
     column_data_compressed_bytes AS on_disk
 FROM system.parts_columns
 WHERE database = currentDatabase() AND table = 'compression_estimate_strings' AND column = 's' AND active

@@ -8,7 +8,7 @@ ip4	1
 ip6	1
 lc	1
 s	1
-1	1	1	1
+1	1	1
 1	1
 A sparse column: measured sparse when the target type can be stored sparse, dense otherwise
 lc	Default	1
@@ -35,7 +35,7 @@ GROUP BY: each group is estimated as the part it would be
 States and combinators
 1
 1
-AggregateFunction(estimateCompressedSize(\'LZ4\', 65536, \'LowCardinality(String)\'), String)
+AggregateFunction(estimateCompressedSize(\'LowCardinality(String)\', \'LZ4\', 65536), String)
 1
 1	1
 1
