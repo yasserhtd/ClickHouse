@@ -485,6 +485,15 @@ public:
 
     bool allocatesMemoryInArena() const override { return false; }
 
+    /// A `Nullable` column is data: its NULL rows are stored, as a part stores them. The factory does not wrap a window function
+    /// with the `Null` combinator, which skips them; the function says so, for the `Null` combinator and for the optimizer that
+    /// rewrites `f(if(cond, x, NULL))` into `fIf(x, cond)` for the functions that skip NULL rows.
+    AggregateFunctionPtr getOwnNullAdapter(
+        const AggregateFunctionPtr & nested_function, const DataTypes &, const Array &, const AggregateFunctionProperties &) const override
+    {
+        return nested_function;
+    }
+
     void create(AggregateDataPtr __restrict place) const override { new (place) Data; } /// NOLINT
     void destroy(AggregateDataPtr __restrict place) const noexcept override { data(place).~Data(); }
     bool hasTrivialDestructor() const override { return false; }

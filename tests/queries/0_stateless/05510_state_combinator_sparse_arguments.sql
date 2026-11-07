@@ -6,7 +6,7 @@ SET max_threads = 1, max_bytes_before_external_group_by = 0, max_bytes_ratio_bef
 DROP TABLE IF EXISTS t_state_sparse;
 CREATE TABLE t_state_sparse (k UInt8, n UInt64, s String, nn Nullable(UInt64))
 ENGINE = MergeTree ORDER BY tuple()
-SETTINGS min_bytes_for_wide_part = 0, ratio_of_defaults_for_sparse_serialization = 0.5;
+SETTINGS min_bytes_for_wide_part = 0, ratio_of_defaults_for_sparse_serialization = 0.5, nullable_serialization_version = 'basic';
 
 INSERT INTO t_state_sparse SELECT number % 3, if(number % 100 = 0, number, 0), if(number % 100 = 0, toString(number), ''), if(number % 100 = 0, number, NULL) FROM numbers(30000);
 

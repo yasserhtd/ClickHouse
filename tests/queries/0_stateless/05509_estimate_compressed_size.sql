@@ -296,13 +296,26 @@ SET cast_keep_nullable = 1;
 SELECT estimateCompressedSize('UInt64', 'LZ4')(toNullable(number)) = estimateCompressedSize('UInt64', 'LZ4')(number) FROM numbers(1000);
 SET cast_keep_nullable = 0;
 
--- Keys of one byte take another path through the aggregator; the rows of a block are converted once there as well, so a wide
--- conversion gives the same size, and so does `-If` with a condition that rejects rows that do not fit.
+-- Keys of one byte take another path through the aggregator; the rows of a block are converted once there as well, also through
+-- `-If`, so a wide conversion gives the same size as with wider keys and as the converted column, and `-If` with a condition
+-- that rejects rows that do not fit works.
 SELECT
     (SELECT any(e) FROM (SELECT k, estimateCompressedSize('FixedString(4000)', 'LZ4')(s) AS e FROM (SELECT toString(number % 100) AS s, toUInt8(number % 2) AS k FROM numbers(8192)) GROUP BY k))
     = (SELECT any(e) FROM (SELECT k, estimateCompressedSize('FixedString(4000)', 'LZ4')(s) AS e FROM (SELECT toString(number % 100) AS s, toUInt64(number % 2) AS k FROM numbers(8192)) GROUP BY k)),
+    (SELECT any(e) FROM (SELECT k, estimateCompressedSizeIf('FixedString(4000)', 'LZ4')(s, number % 3 != 1) AS e FROM (SELECT toString(number % 100) AS s, toUInt8(number % 2) AS k, number FROM numbers(8192)) GROUP BY k))
+    = (SELECT any(e) FROM (SELECT k, estimateCompressedSize('FixedString(4000)', 'LZ4')(toFixedString(s, 4000)) AS e FROM (SELECT toString(number % 100) AS s, toUInt8(number % 2) AS k, number FROM numbers(8192)) WHERE number % 3 != 1 GROUP BY k)),
     (SELECT any(e) FROM (SELECT k, estimateCompressedSizeIf('UInt8', 'LZ4')(number, number < 10) AS e FROM (SELECT toUInt8(number % 2) AS k, number FROM numbers(1000)) GROUP BY k))
     = (SELECT estimateCompressedSize('UInt8', 'LZ4')(toUInt8(number)) FROM numbers(10) WHERE number % 2 = 0);
+
+-- A Nullable column is data: its NULL rows are stored. The optimizer rewrites `f(if(cond, x, NULL))` into `fIf(x, cond)` only
+-- for the functions that skip NULL rows, which this one says it does not; a NULL does not fit a type that is not Nullable.
+SELECT
+    (SELECT estimateCompressedSize('Nullable(UInt64)', 'NONE')(if(number % 2, number, NULL)) FROM numbers(100) SETTINGS optimize_rewrite_aggregate_function_with_if = 1)
+    = (SELECT estimateCompressedSize('Nullable(UInt64)', 'NONE')(if(number % 2, number, NULL)) FROM numbers(100) SETTINGS optimize_rewrite_aggregate_function_with_if = 0),
+    (SELECT estimateCompressedSize('Nullable(UInt64)', 'NONE')(if(number % 2, number, NULL)) FROM numbers(100)) > 100 * 8,
+    (SELECT finalizeAggregation(estimateCompressedSizeState('Nullable(UInt64)', 'NONE')(if(number % 2, number, NULL))) FROM numbers(100) SETTINGS optimize_rewrite_aggregate_function_with_if = 1)
+    = (SELECT estimateCompressedSize('Nullable(UInt64)', 'NONE')(if(number % 2, number, NULL)) FROM numbers(100) SETTINGS optimize_rewrite_aggregate_function_with_if = 0);
+SELECT estimateCompressedSize('UInt64', 'NONE')(if(number % 2, number, NULL)) FROM numbers(100) SETTINGS optimize_rewrite_aggregate_function_with_if = 1; -- { serverError CANNOT_INSERT_NULL_IN_ORDINARY_COLUMN }
 
 SELECT 'Specialized codecs on the data substream';
 

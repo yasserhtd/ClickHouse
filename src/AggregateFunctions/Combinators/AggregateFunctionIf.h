@@ -162,6 +162,32 @@ public:
         nested_func->addBatch(row_begin, row_end, places, place_offset, columns, arena, num_arguments - 1);
     }
 
+    /// The states are looked up here and the rows go to the nested function as a batch with the condition, so that a nested
+    /// function that handles a batch at once (`estimateCompressedSize` converts its rows once per block) does so with keys of one
+    /// byte as well, instead of being called row by row.
+    void addBatchLookupTable8(
+        size_t row_begin,
+        size_t row_end,
+        AggregateDataPtr * map,
+        size_t place_offset,
+        std::function<void(AggregateDataPtr &)> init,
+        const UInt8 * key,
+        const IColumn ** columns,
+        Arena * arena) const override
+    {
+        PODArray<AggregateDataPtr> places(row_end);
+        for (size_t i = row_begin; i < row_end; ++i)
+        {
+            AggregateDataPtr & place = map[key[i]];
+            if (unlikely(!place))
+                init(place);
+            places[i] = place;
+        }
+        if (only_null_condition)
+            return;
+        nested_func->addBatch(row_begin, row_end, places.data(), place_offset, columns, arena, num_arguments - 1);
+    }
+
     void addBatchWithNonNullPlaces(
         size_t row_begin,
         size_t row_end,
