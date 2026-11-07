@@ -115,8 +115,9 @@ public:
     const WriterSettings & getSettings() const { return settings; }
 
     /// Rows of a granule of a block of `column`, as `computeIndexGranularity` sizes the granules of a table that has this column
-    /// alone.
+    /// alone; `granuleRows(rows, bytes)` for a block of that many rows and bytes of it.
     size_t granuleRows(const IColumn & column) const;
+    size_t granuleRows(size_t rows, size_t bytes) const;
 
     /// A writer with a compressed stream per substream of `column`, after the prefix.
     std::unique_ptr<Writer> startWriter(const IColumn & column) const;

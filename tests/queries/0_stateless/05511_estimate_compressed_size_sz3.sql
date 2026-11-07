@@ -27,7 +27,15 @@ CROSS JOIN
 ) AS estimates
 WHERE database = currentDatabase() AND table = 't_ecs_sz3' AND active AND column = 'v';
 
--- With keys, each group sets the dimension for its own codec.
-SELECT count(), min(estimate) > 0 FROM (SELECT estimateCompressedSize('Array(Float32)', 'SZ3(''ALGO_LORENZO_REG'', ''ABS'', 0.001)')(v) AS estimate FROM t_ecs_sz3 GROUP BY length(v) % 2);
+-- With keys, each group sets the dimension for its own codec, from its own rows: groups of vectors of two lengths give the same
+-- sizes whether the rows reach them one at a time or, aggregated in order, as ranges of a block the groups share.
+DROP TABLE IF EXISTS t_ecs_sz3_groups;
+CREATE TABLE t_ecs_sz3_groups (k UInt8, v Array(Float32)) ENGINE = MergeTree ORDER BY k SETTINGS min_bytes_for_wide_part = 0;
+INSERT INTO t_ecs_sz3_groups SELECT number % 2, arrayMap(i -> sin(number / 100 + i / 10), range(if(number % 2 = 0, 8, 16))) FROM numbers(1000);
+SELECT k, e_ordinary = e_in_order
+FROM (SELECT k, estimateCompressedSize('Array(Float32)', 'SZ3(''ALGO_LORENZO_REG'', ''ABS'', 0.001)')(v) AS e_ordinary FROM t_ecs_sz3_groups GROUP BY k SETTINGS optimize_aggregation_in_order = 0) AS ordinary
+INNER JOIN (SELECT k, estimateCompressedSize('Array(Float32)', 'SZ3(''ALGO_LORENZO_REG'', ''ABS'', 0.001)')(v) AS e_in_order FROM t_ecs_sz3_groups GROUP BY k SETTINGS optimize_aggregation_in_order = 1) AS in_order USING (k)
+ORDER BY k;
+DROP TABLE t_ecs_sz3_groups;
 
 DROP TABLE t_ecs_sz3;

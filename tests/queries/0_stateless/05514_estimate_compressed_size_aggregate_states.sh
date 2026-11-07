@@ -31,3 +31,16 @@ CROSS JOIN
 ) AS estimates
 WHERE table = 't_ecs_states' AND active AND column = 'st';
 " -- --merge_tree.index_granularity_bytes=4096
+
+# The granules of a group are sized by the rows each block gives it, as the writer sizes the granules of a partition by its rows of
+# a block: rows that get wider from one block to the next make smaller granules, in a group as in the rows of the group alone.
+$CLICKHOUSE_LOCAL --multiquery --query "
+SET max_threads = 1, max_block_size = 8192;
+DROP TABLE IF EXISTS t_ecs_widths;
+CREATE TABLE t_ecs_widths (k UInt8, s String) ENGINE = Memory;
+INSERT INTO t_ecs_widths SELECT number % 2, repeat('x', 10) FROM numbers(16384);
+INSERT INTO t_ecs_widths SELECT number % 2, repeat('x', 200) FROM numbers(16384);
+SELECT k, e = (SELECT estimateCompressedSize('String', 'LZ4')(s) FROM t_ecs_widths WHERE k = 0) AS same_as_the_rows_alone
+FROM (SELECT k, estimateCompressedSize('String', 'LZ4')(s) AS e FROM t_ecs_widths GROUP BY k)
+ORDER BY k;
+" -- --merge_tree.index_granularity_bytes=131072

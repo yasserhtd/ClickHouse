@@ -591,6 +591,9 @@ SELECT estimateCompressedSize('UInt64', 'LZ4', 'ZSTD')(number) FROM numbers(1); 
 SELECT estimateCompressedSize('UInt64', 1024, 2048)(number) FROM numbers(1); -- { serverError BAD_QUERY_PARAMETER }
 SELECT estimateCompressedSize('UInt64', 'LZ4', 65536, 'Int8')(number) FROM numbers(1); -- { serverError UNKNOWN_QUERY_PARAMETER }
 SELECT estimateCompressedSize('String', 'LZ4')(s, lc) FROM t_ecs; -- { serverError NUMBER_OF_ARGUMENTS_DOESNT_MATCH }
+-- The function handles Nullable arguments itself, so the condition of -If is not adapted: it has to be UInt8.
+SELECT estimateCompressedSizeIf('UInt64', 'NONE')(number, toNullable(number % 2 = 0)) FROM numbers(100); -- { serverError ILLEGAL_TYPE_OF_ARGUMENT }
+SELECT estimateCompressedSizeIf('UInt64', 'NONE')(number, ifNull(toNullable(number % 2 = 0), 0)) = estimateCompressedSizeIf('UInt64', 'NONE')(number, number % 2 = 0) FROM numbers(100);
 
 DROP TABLE t_ecs_parts;
 DROP TABLE t_ecs;

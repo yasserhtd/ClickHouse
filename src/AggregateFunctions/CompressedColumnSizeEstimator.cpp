@@ -205,9 +205,14 @@ MarkInCompressedFile CompressedColumnSizeEstimator::Writer::markFor(const ISeria
 
 void CompressedColumnSizeEstimator::Writer::write(const IColumn & rows, size_t offset, size_t limit, size_t granule_rows)
 {
-    /// As `MergeTreeDataPartWriterWide::writeColumn` before the granules of a block.
-    for (const auto & codec : vector_codecs)
-        MergeTreeDataPartWriterOnDisk::setVectorDimensionsIfNeeded(codec, &rows);
+    /// As `MergeTreeDataPartWriterWide::writeColumn` before the granules of a block: from the rows written, not from the rows of
+    /// other states that share the column.
+    if (!vector_codecs.empty())
+    {
+        const ColumnPtr written = (offset == 0 && limit == rows.size()) ? rows.getPtr() : rows.cut(offset, limit);
+        for (const auto & codec : vector_codecs)
+            MergeTreeDataPartWriterOnDisk::setVectorDimensionsIfNeeded(codec, written.get());
+    }
 
     for (size_t end = offset + limit; offset < end;)
     {
@@ -307,12 +312,19 @@ CompressedColumnSizeEstimator::StreamLayout CompressedColumnSizeEstimator::resol
 
 size_t CompressedColumnSizeEstimator::granuleRows(const IColumn & column) const
 {
-    /// The writer counts the bytes of all columns of the block, so the granules of a table with wide rows are smaller.
     if (column.empty())
         return settings.index_granularity;
+    return granuleRows(column.size(), getColumnSizeForGranularity(column));
+}
+
+size_t CompressedColumnSizeEstimator::granuleRows(size_t rows, size_t bytes) const
+{
+    /// The writer counts the bytes of all columns of the block, so the granules of a table with wide rows are smaller.
+    if (rows == 0)
+        return settings.index_granularity;
     return computeIndexGranularity(
-        column.size(),
-        getColumnSizeForGranularity(column),
+        rows,
+        bytes,
         settings.index_granularity_bytes,
         settings.index_granularity,
         /*blocks_are_granules=*/ false,
