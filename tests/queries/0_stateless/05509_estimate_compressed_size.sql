@@ -291,6 +291,19 @@ SELECT estimateCompressedSize('Date', 'LZ4')(toDate32('1900-01-01') + toInterval
 SET date_time_overflow_behavior = 'ignore';
 SELECT estimateCompressedSize('Date', 'LZ4')(x) = estimateCompressedSize('Date', 'LZ4')(accurateCast(x, 'Date')) FROM (SELECT toDate32('1900-01-01') + toIntervalDay(number) AS x FROM numbers(1000));
 
+-- The rows are estimated as the named type, also where `accurateCast` would keep them Nullable.
+SET cast_keep_nullable = 1;
+SELECT estimateCompressedSize('UInt64', 'LZ4')(toNullable(number)) = estimateCompressedSize('UInt64', 'LZ4')(number) FROM numbers(1000);
+SET cast_keep_nullable = 0;
+
+-- Keys of one byte take another path through the aggregator; the rows of a block are converted once there as well, so a wide
+-- conversion gives the same size, and so does `-If` with a condition that rejects rows that do not fit.
+SELECT
+    (SELECT any(e) FROM (SELECT k, estimateCompressedSize('FixedString(4000)', 'LZ4')(s) AS e FROM (SELECT toString(number % 100) AS s, toUInt8(number % 2) AS k FROM numbers(8192)) GROUP BY k))
+    = (SELECT any(e) FROM (SELECT k, estimateCompressedSize('FixedString(4000)', 'LZ4')(s) AS e FROM (SELECT toString(number % 100) AS s, toUInt64(number % 2) AS k FROM numbers(8192)) GROUP BY k)),
+    (SELECT any(e) FROM (SELECT k, estimateCompressedSizeIf('UInt8', 'LZ4')(number, number < 10) AS e FROM (SELECT toUInt8(number % 2) AS k, number FROM numbers(1000)) GROUP BY k))
+    = (SELECT estimateCompressedSize('UInt8', 'LZ4')(toUInt8(number)) FROM numbers(10) WHERE number % 2 = 0);
+
 SELECT 'Specialized codecs on the data substream';
 
 DROP TABLE IF EXISTS t_ecs_t64;

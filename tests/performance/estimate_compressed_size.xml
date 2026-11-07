@@ -9,6 +9,7 @@
     <query>SELECT estimateCompressedSize('IPv6', 'LZ4', 65536)(ip4) FROM t_ecs_perf FORMAT Null</query>
     <query>SELECT k, estimateCompressedSize('String', 'LZ4', 65536)(s) FROM t_ecs_perf GROUP BY k FORMAT Null</query>
     <query>SELECT k, estimateCompressedSize('LowCardinality(String)', 'LZ4', 65536)(s) FROM t_ecs_perf GROUP BY k FORMAT Null</query>
+    <query>SELECT toUInt8(k % 2) AS k8, estimateCompressedSize('LowCardinality(String)', 'LZ4', 65536)(s) FROM t_ecs_perf GROUP BY k8 FORMAT Null</query>
     <query>SELECT estimateCompressedSize('String', 'LZ4', 65536)(s) FROM t_ecs_perf SETTINGS max_block_size = 1000 FORMAT Null</query>
 
     <drop_query>DROP TABLE IF EXISTS t_ecs_perf</drop_query>

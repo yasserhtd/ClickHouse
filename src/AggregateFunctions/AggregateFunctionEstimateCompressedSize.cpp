@@ -12,6 +12,7 @@
 #include <Compression/CompressionFactory.h>
 #include <Compression/ICompressionCodec.h>
 #include <Core/Defines.h>
+#include <Core/Settings.h>
 #include <DataTypes/DataTypeArray.h>
 #include <DataTypes/DataTypeFactory.h>
 #include <DataTypes/DataTypeNullable.h>
@@ -40,9 +41,15 @@ namespace DB
 {
 struct Settings;
 
+namespace Setting
+{
+    extern const SettingsBool cast_keep_nullable;
+}
+
 namespace ErrorCodes
 {
 extern const int BAD_QUERY_PARAMETER;
+extern const int LOGICAL_ERROR;
 extern const int UNKNOWN_QUERY_PARAMETER;
 extern const int NUMBER_OF_ARGUMENTS_DOESNT_MATCH;
 }
@@ -121,11 +128,18 @@ struct EstimateCompressedSizeConfig
 
 /** Estimates the compressed size of a column stored as a given type: the rows are converted to the `target_type` parameter,
   * written as MergeTree writes a column of a wide part, and the compressed bytes are read off the writer.
+  *
+  * Derived from `IAggregateFunctionHelper` rather than `IAggregateFunctionDataHelper`, whose `addBatchLookupTable8` is final
+  * and adds the rows one at a time for a state of this size: the rows of a block are converted once here, whatever the keys.
   */
-class AggregateFunctionEstimateCompressedSize final
-    : public IAggregateFunctionDataHelper<AggregateFunctionEstimateCompressedSizeData, AggregateFunctionEstimateCompressedSize>
+class AggregateFunctionEstimateCompressedSize final : public IAggregateFunctionHelper<AggregateFunctionEstimateCompressedSize>
 {
 private:
+    using Data = AggregateFunctionEstimateCompressedSizeData;
+
+    static Data & data(AggregateDataPtr __restrict place) { return *reinterpret_cast<Data *>(place); } /// NOLINT(readability-non-const-parameter)
+    static const Data & data(ConstAggregateDataPtr __restrict place) { return *reinterpret_cast<const Data *>(place); }
+
     const EstimateCompressedSizeConfig config;
     /// The type the rows arrive as.
     const DataTypePtr argument_type;
@@ -156,14 +170,29 @@ private:
     }
 
     /// The cast to `to`, as `accurateCast` casts in this query: the same resolver, with the conversion settings of the query, of
-    /// which the cast takes a snapshot (the context is not kept). `prepare` builds the converters and so rejects a conversion that
-    /// does not exist.
+    /// which the cast takes a snapshot (the context is not kept). Except `cast_keep_nullable`: the rows are estimated as the named
+    /// type, not as its `Nullable`. `prepare` builds the converters and so rejects a conversion that does not exist.
     static Conversion createCast(const DataTypePtr & from, const DataTypePtr & to, const ContextPtr & context)
     {
+        ContextPtr cast_context = context;
+        if (context->getSettingsRef()[Setting::cast_keep_nullable])
+        {
+            auto copy = Context::createCopy(context);
+            copy->setSetting("cast_keep_nullable", Field(false));
+            cast_context = copy;
+        }
+
         const auto type_name = std::make_shared<DataTypeString>();
         ColumnsWithTypeAndName arguments{{from->createColumn(), from, ""}, {type_name->createColumnConst(1, to->getName()), type_name, ""}};
         Conversion conversion;
-        conversion.function = createCastOverloadResolver(context, CastType::accurate, {})->build(arguments);
+        conversion.function = createCastOverloadResolver(cast_context, CastType::accurate, {})->build(arguments);
+        if (!conversion.function->getResultType()->equals(*to))
+            throw Exception(
+                ErrorCodes::LOGICAL_ERROR,
+                "The conversion of {} to {} gives {}",
+                from->getName(),
+                to->getName(),
+                conversion.function->getResultType()->getName());
         conversion.prepared = conversion.function->prepare(arguments);
         return conversion;
     }
@@ -438,7 +467,7 @@ private:
 
 public:
     AggregateFunctionEstimateCompressedSize(const DataTypes & arguments, const Array & params, EstimateCompressedSizeConfig config_)
-        : IAggregateFunctionDataHelper(arguments, params, std::make_shared<DataTypeUInt64>())
+        : IAggregateFunctionHelper(arguments, params, std::make_shared<DataTypeUInt64>())
         , config(std::move(config_))
         , argument_type(arguments[0])
         , estimated_type(config.target_type)
@@ -455,6 +484,12 @@ public:
     String getName() const override { return "estimateCompressedSize"; }
 
     bool allocatesMemoryInArena() const override { return false; }
+
+    void create(AggregateDataPtr __restrict place) const override { new (place) Data; } /// NOLINT
+    void destroy(AggregateDataPtr __restrict place) const noexcept override { data(place).~Data(); }
+    bool hasTrivialDestructor() const override { return false; }
+    size_t sizeOfData() const override { return sizeof(Data); }
+    size_t alignOfData() const override { return alignof(Data); }
 
     void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
     {
@@ -547,6 +582,29 @@ public:
     {
         const UInt8 * flags = if_argument_pos >= 0 ? assert_cast<const ColumnUInt8 &>(*columns[if_argument_pos]).getData().data() : nullptr;
         addBatchConverted(row_begin, row_end, places, place_offset, *columns[0], flags, /*places_are_non_null=*/ true);
+    }
+
+    /// Keys of one byte: the aggregator looks the states up in a table of 256. The states are created here, then the rows are
+    /// added as any batch, converted once.
+    void addBatchLookupTable8(
+        size_t row_begin,
+        size_t row_end,
+        AggregateDataPtr * map,
+        size_t place_offset,
+        std::function<void(AggregateDataPtr &)> init,
+        const UInt8 * key,
+        const IColumn ** columns,
+        Arena *) const override
+    {
+        PODArray<AggregateDataPtr> places(row_end);
+        for (size_t i = row_begin; i < row_end; ++i)
+        {
+            AggregateDataPtr & place = map[key[i]];
+            if (unlikely(!place))
+                init(place);
+            places[i] = place;
+        }
+        addBatchConverted(row_begin, row_end, places.data(), place_offset, *columns[0], nullptr, /*places_are_non_null=*/ true);
     }
 
     void addBatchSinglePlace(
