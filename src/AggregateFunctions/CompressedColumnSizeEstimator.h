@@ -96,6 +96,9 @@ public:
         ColumnPtr sample;
         /// A handful of substreams: a linear search beats hashing.
         VectorWithMemoryTracking<Stream> streams;
+        /// The codecs that take the dimension of the vectors they compress (`SZ3`), set from every block as the writer sets it.
+        /// Instances of this writer, since the dimension is set on the codec.
+        VectorWithMemoryTracking<CompressionCodecPtr> vector_codecs;
         const size_t min_compress_block_size;
         /// The rows of the open granule, and the rows it holds when complete.
         size_t rows_in_granule = 0;

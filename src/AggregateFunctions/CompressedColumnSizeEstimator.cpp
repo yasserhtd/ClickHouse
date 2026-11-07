@@ -9,6 +9,7 @@
 #include <Formats/MarkInCompressedFile.h>
 #include <Interpreters/Context.h>
 #include <Storages/MergeTree/MergeTreeDataPartType.h>
+#include <Storages/MergeTree/MergeTreeDataPartWriterOnDisk.h>
 #include <Storages/MergeTree/MergeTreeIndexGranularity.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Common/CurrentThread.h>
@@ -203,6 +204,10 @@ MarkInCompressedFile CompressedColumnSizeEstimator::Writer::markFor(const ISeria
 
 void CompressedColumnSizeEstimator::Writer::write(const IColumn & rows, size_t offset, size_t limit, size_t granule_rows)
 {
+    /// As `MergeTreeDataPartWriterWide::writeColumn` before the granules of a block.
+    for (const auto & codec : vector_codecs)
+        MergeTreeDataPartWriterOnDisk::setVectorDimensionsIfNeeded(codec, &rows);
+
     for (size_t end = offset + limit; offset < end;)
     {
         if (rows_in_granule == 0)
@@ -327,8 +332,15 @@ std::unique_ptr<CompressedColumnSizeEstimator::Writer> CompressedColumnSizeEstim
             const String key = ISerialization::getSubstreamsCacheKeyForStream(path);
             auto it = stream_layouts.find(key);
             const StreamLayout layout = it != stream_layouts.end() ? it->second : resolveStreamLayout(path);
+            CompressionCodecPtr codec = layout.codec;
+            if (codec->needsVectorDimensionUpfront())
+            {
+                /// The dimension is set on the codec: an instance of this writer, not the shared one.
+                codec = resolveStreamLayout(path).codec;
+                raw->vector_codecs.push_back(codec);
+            }
             raw->streams.push_back(
-                {key, std::make_unique<CompressedSizeCalculator>(layout.codec, layout.block_size, layout.adaptive_initial_size)});
+                {key, std::make_unique<CompressedSizeCalculator>(codec, layout.block_size, layout.adaptive_initial_size)});
         },
         ISerialization::SubstreamData(serialization).withType(type).withColumn(column.getPtr()));
     writer->settings.getter = [raw](const ISerialization::SubstreamPath & path) -> WriteBuffer * { return raw->calculatorFor(path); };

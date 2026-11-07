@@ -126,9 +126,11 @@ protected:
 
     virtual ISerialization::SerializeBinaryBulkSettings getSerializationSettings() const = 0;
 
-    /// This is useful only for vector codecs (like SZ3).
+public:
+    /// This is useful only for vector codecs (like SZ3). Also used by `estimateCompressedSize`, which writes as this writer does.
     static void setVectorDimensionsIfNeeded(CompressionCodecPtr codec, const IColumn * column);
 
+protected:
     const MergeTreeIndices skip_indices;
     const String marks_file_extension;
     const CompressionCodecPtr default_codec;

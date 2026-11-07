@@ -248,6 +248,41 @@ ORDER BY column;
 
 DROP TABLE t_ecs_types;
 
+-- The granules of a block are sized by the converted rows, as the writer sizes them by the block it writes: short strings
+-- estimated as a wide FixedString make granules of fewer rows.
+SET allow_suspicious_fixed_string_types = 1;
+
+DROP TABLE IF EXISTS t_ecs_fixed;
+CREATE TABLE t_ecs_fixed (f FixedString(4000) CODEC(LZ4), s String CODEC(LZ4)) ENGINE = MergeTree ORDER BY tuple()
+SETTINGS min_bytes_for_wide_part = 0, ratio_of_defaults_for_sparse_serialization = 1;
+
+INSERT INTO t_ecs_fixed SELECT toFixedString(toString(number % 100), 4000), toString(number % 100) FROM numbers(8192);
+
+SELECT
+    column_data_compressed_bytes = from_string AS matches_from_string,
+    column_data_compressed_bytes = from_fixed AS matches_from_fixed,
+    column_data_compressed_bytes = grouped AS matches_grouped
+FROM system.parts_columns
+CROSS JOIN
+(
+    SELECT
+        (SELECT estimateCompressedSize('FixedString(4000)', 'LZ4')(s) FROM t_ecs_fixed) AS from_string,
+        (SELECT estimateCompressedSize('FixedString(4000)', 'LZ4')(f) FROM t_ecs_fixed) AS from_fixed,
+        (SELECT any(e) FROM (SELECT k, estimateCompressedSize('FixedString(4000)', 'LZ4')(s) AS e FROM (SELECT s, 0 AS k FROM t_ecs_fixed) GROUP BY k)) AS grouped
+) AS estimates
+WHERE database = currentDatabase() AND table = 't_ecs_fixed' AND active AND column = 'f';
+
+DROP TABLE t_ecs_fixed;
+
+-- The rows are converted with the conversion settings of the query, as `accurateCast` converts them.
+SET date_time_input_format = 'best_effort';
+SELECT
+    estimateCompressedSize('DateTime', 'LZ4')(concat('07 Nov 2026 12:00:', leftPad(toString(number % 60), 2, '0')))
+    = estimateCompressedSize('DateTime', 'LZ4')(toDateTime('2026-11-07 12:00:00', 'UTC') + number % 60)
+FROM numbers(1000)
+SETTINGS session_timezone = 'UTC';
+SET date_time_input_format = 'basic';
+
 SELECT 'Specialized codecs on the data substream';
 
 SET allow_suspicious_low_cardinality_types = 1;
@@ -341,8 +376,40 @@ FROM (SELECT number % 3 AS k, if(number < 100, '{"a":1}', concat('{"b', toString
 GROUP BY k ORDER BY k
 SETTINGS max_block_size = 100;
 
--- The serialization of the shared typed paths of JSON ends the data stream of every granule with `next` itself. With NONE, a
--- compressed block is never smaller than its data, also when `next` finds the buffer exactly full (8192 rows of 8 bytes).
+-- The serialization of the shared typed paths of JSON cuts the blocks of its data stream itself, by the offset of the stream,
+-- also when a granule fills the adaptive buffer exactly (8192 rows of 8 bytes). As every JSON column, it is estimated with the
+-- layout of a merged part: a part written by one insert is a few dozen bytes smaller.
+DROP TABLE IF EXISTS t_ecs_shared;
+CREATE TABLE t_ecs_shared (j JSON(SHARED a UInt64, SHARED b UInt64) CODEC(LZ4), s JSON(SHARED a UInt64) CODEC(LZ4))
+ENGINE = MergeTree ORDER BY tuple()
+SETTINGS min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0, ratio_of_defaults_for_sparse_serialization = 1;
+
+INSERT INTO t_ecs_shared
+SELECT
+    CAST(concat('{"a":', toString(number), ',"b":', toString(number * 2), '}'), 'JSON(SHARED a UInt64, SHARED b UInt64)'),
+    CAST(concat('{"a":', toString(number), '}'), 'JSON(SHARED a UInt64)')
+FROM numbers(8192);
+
+INSERT INTO t_ecs_shared
+SELECT
+    CAST(concat('{"a":', toString(number), ',"b":', toString(number * 2), '}'), 'JSON(SHARED a UInt64, SHARED b UInt64)'),
+    CAST(concat('{"a":', toString(number), '}'), 'JSON(SHARED a UInt64)')
+FROM numbers(8192, 1808);
+
+OPTIMIZE TABLE t_ecs_shared FINAL;
+
+SELECT column, column_data_compressed_bytes = estimate AS matches_on_disk_size
+FROM system.parts_columns
+INNER JOIN
+(
+    SELECT 'j' AS column, estimateCompressedSize('JSON(SHARED a UInt64, SHARED b UInt64)', 'LZ4')(j) AS estimate FROM t_ecs_shared
+    UNION ALL SELECT 's', estimateCompressedSize('JSON(SHARED a UInt64)', 'LZ4')(s) FROM t_ecs_shared
+) AS estimates USING (column)
+WHERE database = currentDatabase() AND table = 't_ecs_shared' AND active
+ORDER BY column;
+
+DROP TABLE t_ecs_shared;
+
 SELECT rows, estimateCompressedSize('JSON(SHARED a UInt64)', 'NONE')(j) > rows * 8
 FROM (SELECT number, CAST(concat('{"a":', toString(number), '}'), 'JSON(SHARED a UInt64)') AS j FROM numbers(16384))
 ARRAY JOIN [8191, 8192, 10000, 16384] AS rows
@@ -451,6 +518,19 @@ FROM
         estimateCompressedSize('LowCardinality(String)', 'LZ4', 65536)(lc) OVER (ORDER BY k, s ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS r_lc,
         estimateCompressedSize('String', 'LZ4', 65536)(s) OVER (ORDER BY k, s ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS r_s
     FROM (SELECT * FROM t_ecs LIMIT 1000)
+);
+
+-- A growing frame gives a result after every row and closes the part of its state each time: the rows after the first result
+-- are parts of their own. The whole frame is one part, the size of the aggregate.
+SELECT
+    any(w) = (SELECT estimateCompressedSize('LowCardinality(String)', 'LZ4', 65536)(s) FROM t_ecs),
+    max(g) > any(w)
+FROM
+(
+    SELECT
+        estimateCompressedSize('LowCardinality(String)', 'LZ4', 65536)(s) OVER () AS w,
+        estimateCompressedSize('LowCardinality(String)', 'LZ4', 65536)(s) OVER (ORDER BY k, s ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS g
+    FROM t_ecs
 );
 
 SELECT 'No rows, and the empty string';

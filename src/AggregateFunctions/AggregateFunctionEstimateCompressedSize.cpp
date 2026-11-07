@@ -25,11 +25,14 @@
 #include <IO/VarInt.h>
 #include <IO/WriteBuffer.h>
 #include <IO/WriteHelpers.h>
+#include <Interpreters/Context.h>
 #include <Parsers/ExpressionElementParsers.h>
 #include <Parsers/parseQuery.h>
 #include <base/defines.h>
 #include <base/types.h>
 #include <Common/Arena.h>
+#include <Common/CurrentThread.h>
+#include <Common/ThreadStatus.h>
 #include <Common/Exception.h>
 #include <Common/assert_cast.h>
 
@@ -152,14 +155,26 @@ private:
         return ast;
     }
 
-    /// The cast to `to`; `prepare` builds the converters and so rejects a conversion that does not exist.
-    static Conversion createCast(const DataTypePtr & from, const DataTypePtr & to)
+    /// The cast to `to`, with the conversion settings of the query (the cast takes a snapshot of them, the context is not kept);
+    /// `prepare` builds the converters and so rejects a conversion that does not exist.
+    static Conversion createCast(const DataTypePtr & from, const DataTypePtr & to, const ContextPtr & context)
     {
         ColumnsWithTypeAndName arguments{{from->createColumn(), from, ""}, {nullptr, std::make_shared<DataTypeString>(), ""}};
         Conversion conversion;
-        conversion.function = createInternalCast(arguments[0], to, CastType::accurate, {}, nullptr);
+        conversion.function = createInternalCast(arguments[0], to, CastType::accurate, {}, context);
         conversion.prepared = conversion.function->prepare(arguments);
         return conversion;
+    }
+
+    /// The context of the query, else the global one, as `CompressedColumnSizeEstimator::WriterSettings::fromServer` takes it.
+    static ContextPtr currentContext()
+    {
+        ContextPtr context;
+        if (CurrentThread::isInitialized())
+            context = CurrentThread::get().tryGetQueryContext();
+        if (!context)
+            context = Context::getGlobalContextInstance();
+        return context;
     }
 
     /// The settings of the writer, with `block_size_bytes` as both the smallest and the largest size of a compressed block.
@@ -205,33 +220,30 @@ private:
         return *data_ref.run;
     }
 
-    /// `rows` of `argument_type` converted to `estimated_type`. A sparse column stays sparse through a conversion that keeps its
-    /// default value the default, as a table stores the converted column (see `IExecutableFunction::executeWithoutReplicatedColumns`).
+    /// `rows` of `argument_type` converted to `estimated_type`, when they differ. The rows are converted as they arrive, so that
+    /// everything after (the size of a granule, the kind of a sparse column, the buffer of a state) follows the estimated type, as
+    /// it follows the written column in a part. A sparse column stays sparse through a conversion that keeps its default value the
+    /// default, as a table stores the converted column (see `IExecutableFunction::executeWithoutReplicatedColumns`).
     ColumnPtr convertRows(const ColumnPtr & rows) const
     {
+        if (!conversion)
+            return rows;
+
         ColumnsWithTypeAndName arguments{
             {rows, argument_type, ""},
             {DataTypeString().createColumnConst(rows->size(), estimated_type->getName()), std::make_shared<DataTypeString>(), ""}};
         return conversion->prepared->execute(arguments, estimated_type, rows->size(), /*dry_run=*/ false);
     }
 
-    /// Serializes the rows of [offset, offset + limit) into the granules of the run, which hold `granule_rows` rows each, as the
-    /// writer serializes a block.
+    /// Serializes the rows of [offset, offset + limit), already of `estimated_type`, into the granules of the run, which hold
+    /// `granule_rows` rows each, as the writer serializes a block.
     void serializeRows(const Data & data_ref, const IColumn & rows, size_t offset, size_t limit, size_t granule_rows) const
     {
-        /// No rows start no run: the kind of an empty converted column is not the kind of the rows to come.
+        /// No rows start no run: the kind of an empty column is not the kind of the rows to come.
         if (limit == 0)
             return;
 
-        if (!conversion)
-        {
-            runFor(data_ref, rows).writer->write(rows, offset, limit, granule_rows);
-            return;
-        }
-
-        const ColumnPtr input = (offset == 0 && limit == rows.size()) ? rows.getPtr() : rows.cut(offset, limit);
-        const ColumnPtr converted = convertRows(input);
-        runFor(data_ref, *converted).writer->write(*converted, 0, limit, granule_rows);
+        runFor(data_ref, rows).writer->write(rows, offset, limit, granule_rows);
     }
 
     /// The buffer of the state, of the kind of `rows`: a sparse column stays sparse.
@@ -384,14 +396,42 @@ private:
             }
         }
 
+        ColumnPtr converted;
+        if (conversion)
+        {
+            converted = convertRows((offset == 0 && limit == rows->size()) ? rows->getPtr() : rows->cut(offset, limit));
+            rows = converted.get();
+            offset = 0;
+        }
+
+        ColumnPtr dense;
         if (rows->isSparse() && !sparse_allowed)
         {
-            ColumnPtr dense = recursiveRemoveSparse(rows->getPtr());
-            filtered = std::move(dense);
-            rows = filtered.get();
+            dense = recursiveRemoveSparse(rows->getPtr());
+            rows = dense.get();
         }
 
         addRows(data(place), *rows, offset, limit);
+    }
+
+    /// Adds the rows of [row_begin, row_end) of a column of `estimated_type` to their states, one at a time: the per-row path of a
+    /// `GROUP BY`, with the kind of the rows looked up once for the column rather than once per row.
+    void addRowsToPlaces(
+        size_t row_begin, size_t row_end, AggregateDataPtr * places, size_t place_offset, const IColumn & column, const UInt8 * flags) const
+    {
+        const bool densify = column.isSparse() && !sparse_allowed;
+        const bool rows_are_sparse = column.isSparse() && !densify;
+        for (size_t i = row_begin; i < row_end; ++i)
+        {
+            if (!places[i] || (flags && !flags[i]))
+                continue;
+            AggregateDataPtr place = places[i] + place_offset;
+            startBufferOfKind(data(place), rows_are_sparse);
+            if (densify)
+                addRowDense(place, column, i);
+            else
+                addRow(place, column, i);
+        }
     }
 
 public:
@@ -400,7 +440,8 @@ public:
         , config(std::move(config_))
         , argument_type(arguments[0])
         , estimated_type(config.target_type)
-        , conversion(estimated_type->equals(*argument_type) ? std::nullopt : std::optional(createCast(argument_type, estimated_type)))
+        , conversion(
+              estimated_type->equals(*argument_type) ? std::nullopt : std::optional(createCast(argument_type, estimated_type, currentContext())))
         , buffer_partial_granules(!isSplitIndependent(*estimated_type))
         , default_codec(config.writer_settings.default_codec)
         , codec_description(config.codec ? parseCodecDescription(*config.codec) : default_codec->getFullCodecDescription())
@@ -415,15 +456,27 @@ public:
 
     void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
     {
-        const bool rows_are_sparse = columns[0]->isSparse() && sparse_allowed;
-        startBufferOfKind(data(place), rows_are_sparse);
-        if (rows_are_sparse || !columns[0]->isSparse())
-            addRow(place, *columns[0], row_num);
+        /// One row at a time: a window function, `-Array`. The row is converted on its own.
+        const IColumn * column = columns[0];
+        size_t row = row_num;
+        ColumnPtr converted;
+        if (conversion)
+        {
+            converted = convertRows(columns[0]->cut(row_num, 1));
+            column = converted.get();
+            row = 0;
+        }
+
+        const bool densify = column->isSparse() && !sparse_allowed;
+        startBufferOfKind(data(place), column->isSparse() && !densify);
+        if (densify)
+            addRowDense(place, *column, row);
         else
-            addRowDense(place, *columns[0], row_num);
+            addRow(place, *column, row);
     }
 
-    /// As the inherited version, with the kind of the rows looked up once for the block rather than once per row.
+    /// As the inherited versions, with the rows converted once for the block. The aggregator calls `addBatchWithNonNullPlaces`
+    /// when every row has a state, `addBatch` otherwise; the inherited versions of both add the rows one at a time with `add`.
     void addBatch(
         size_t row_begin,
         size_t row_end,
@@ -433,21 +486,21 @@ public:
         Arena *,
         ssize_t if_argument_pos) const override
     {
-        const IColumn & column = *columns[0];
-        const bool densify = column.isSparse() && !sparse_allowed;
-        const bool rows_are_sparse = column.isSparse() && !densify;
         const UInt8 * flags = if_argument_pos >= 0 ? assert_cast<const ColumnUInt8 &>(*columns[if_argument_pos]).getData().data() : nullptr;
-        for (size_t i = row_begin; i < row_end; ++i)
-        {
-            if (!places[i] || (flags && !flags[i]))
-                continue;
-            AggregateDataPtr place = places[i] + place_offset;
-            startBufferOfKind(data(place), rows_are_sparse);
-            if (densify)
-                addRowDense(place, column, i);
-            else
-                addRow(place, column, i);
-        }
+        const ColumnPtr converted = convertRows(columns[0]->getPtr());
+        addRowsToPlaces(row_begin, row_end, places, place_offset, *converted, flags);
+    }
+
+    void addBatchWithNonNullPlaces(
+        size_t row_begin,
+        size_t row_end,
+        AggregateDataPtr * places,
+        size_t place_offset,
+        const IColumn ** columns,
+        Arena * arena,
+        ssize_t if_argument_pos) const override
+    {
+        addBatch(row_begin, row_end, places, place_offset, columns, arena, if_argument_pos);
     }
 
     void addBatchSinglePlace(
@@ -478,24 +531,13 @@ public:
     }
 
     /// With keys too: the sparse column itself reaches the buffer of each group, one row at a time, so that the rows of a group are
-    /// measured sparse, as the part of the group would store them. The inherited version adds the values of the rows, dense.
+    /// measured sparse, as the part of the group would store them (the inherited version adds the values of the rows, dense), unless
+    /// the estimated type cannot be stored sparse.
     void addBatchSparse(
-        size_t row_begin, size_t row_end, AggregateDataPtr * places, size_t place_offset, const IColumn ** columns, Arena * arena) const override
+        size_t row_begin, size_t row_end, AggregateDataPtr * places, size_t place_offset, const IColumn ** columns, Arena *) const override
     {
-        if (!sparse_allowed)
-        {
-            IAggregateFunctionDataHelper::addBatchSparse(row_begin, row_end, places, place_offset, columns, arena);
-            return;
-        }
-
-        for (size_t i = row_begin; i < row_end; ++i)
-        {
-            if (!places[i])
-                continue;
-            AggregateDataPtr place = places[i] + place_offset;
-            startBufferOfKind(data(place), /*rows_are_sparse=*/ true);
-            addRow(place, *columns[0], i);
-        }
+        const ColumnPtr converted = convertRows(columns[0]->getPtr());
+        addRowsToPlaces(row_begin, row_end, places, place_offset, *converted, nullptr);
     }
 
     void mergeImpl(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena *) const override
@@ -616,7 +658,7 @@ The function has no table, so what the writer takes from a table it takes from t
 
 The rows of each `GROUP BY` group and of each window frame are serialized as if they were a part of their own, so the result also depends on how the rows are split between groups, threads and frames. Each state holds the rows it has not serialized yet (up to a granule for `LowCardinality`, `Dynamic`, `JSON`, `Map` and sparse columns, a batch of 2048 rows for the other types) and, once it has serialized a granule, one compression buffer per substream, which grows with the data up to the compressed block size. A `GROUP BY` with many groups therefore needs more memory than with most aggregate functions: in the order of 100 KiB per group holding a granule or more of a `String` column, and the rows of the group below that. A column that a table stores sparse is estimated sparse, except through the `-If` combinator, which receives it dense.
 
-The intermediate state records the size only: merging the states of several groups gives the sum of their sizes, as the parts they would be.
+The intermediate state records the size only: merging the states of several groups gives the sum of their sizes, as the parts they would be. A window function with a growing frame (`ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`) gives a result after every row, and each result closes the part of its state, so every row added after the first result is serialized as a part of its own, with its own headers; the size of all the rows of a frame stored as one part is the result for the whole frame (`OVER ()`) or of the aggregate. `estimateCompressionRatio` behaves the same way.
 
 <Note>
 Without the `codec` parameter, the result depends on the default compression codec of the server.
