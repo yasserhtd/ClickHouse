@@ -63,8 +63,9 @@ public:
         Writer(const Writer &) = delete;
         Writer & operator=(const Writer &) = delete;
 
-        /// Writes rows into the granules of the column: into the open granule first, then whole granules of `granule_rows` rows;
-        /// the rest stays open for the next rows. A complete granule ends the compressed blocks that hold at least
+        /// Writes rows into the granules of the column: into the open granule first (shrunk to `granule_rows` or closed when it
+        /// has more rows left than that, as the writer adjusts its last mark), then whole granules of `granule_rows` rows; the rest
+        /// stays open for the next rows. A complete granule ends the compressed blocks that hold at least
         /// `min_compress_block_size` bytes, as `MergeTreeDataPartWriterWide::getCurrentMarksForColumn` does before a mark.
         /// Rows of another dynamic structure than the first block's (`Dynamic`, `JSON`) are rebuilt with it, as
         /// `MergeTreeDataPartWriterOnDisk::prepareBlockForWriting` does.

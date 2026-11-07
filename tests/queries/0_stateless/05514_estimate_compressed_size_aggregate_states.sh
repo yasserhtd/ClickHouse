@@ -64,3 +64,41 @@ INNER JOIN (SELECT k, estimateCompressedSize('String', 'LZ4')(s) AS in_order FRO
 WHERE table = 't_ecs_ranges_parts' AND active AND column = 's'
 ORDER BY k;
 " -- --merge_tree.index_granularity_bytes=131072
+
+# An open granule meets a block whose granules are smaller than the rows it has left: as the writer adjusts its last mark, the
+# granule closes where it stands, or shrinks to the granule of the block. The merged part gets the blocks of the two parts,
+# 3000 short rows then 8192 wide ones, which a UNION ALL of the two sources gives the estimate too. The estimate ends one
+# compressed block more than the part in this case (16 blocks of the sizes and the characters against 17), so it is within one
+# block header and checksum, 25 bytes, with keys as without.
+$CLICKHOUSE_LOCAL --multiquery --query "
+SET max_threads = 1, max_block_size = 8192;
+DROP TABLE IF EXISTS t_ecs_open;
+CREATE TABLE t_ecs_open (s String CODEC(LZ4)) ENGINE = MergeTree ORDER BY tuple()
+SETTINGS min_bytes_for_wide_part = 0, ratio_of_defaults_for_sparse_serialization = 1;
+INSERT INTO t_ecs_open SELECT repeat('x', 10) FROM numbers(3000);
+INSERT INTO t_ecs_open SELECT repeat('x', 200) FROM numbers(8192);
+OPTIMIZE TABLE t_ecs_open FINAL;
+SELECT abs(toInt64(column_data_compressed_bytes) - toInt64(keyless)) <= 25 AS within_a_block_header, keyless = grouped AS same_with_keys
+FROM system.parts_columns
+CROSS JOIN
+(
+    SELECT
+        (SELECT estimateCompressedSize('String', 'LZ4')(s) FROM (SELECT repeat('x', 10) AS s FROM numbers(3000) UNION ALL SELECT repeat('x', 200) FROM numbers(8192))) AS keyless,
+        (SELECT any(e) FROM (SELECT k, estimateCompressedSize('String', 'LZ4')(s) AS e FROM (SELECT 0 AS k, repeat('x', 10) AS s FROM numbers(3000) UNION ALL SELECT 0, repeat('x', 200) FROM numbers(8192)) GROUP BY k)) AS grouped
+) AS estimates
+WHERE table = 't_ecs_open' AND active AND column = 's';
+" -- --merge_tree.index_granularity_bytes=131072
+
+# A sparse column that a table stores dense (Nullable without allow_sparse) is sized dense before its rows reach the groups.
+$CLICKHOUSE_LOCAL --multiquery --query "
+SET max_threads = 1, allow_suspicious_fixed_string_types = 1;
+DROP TABLE IF EXISTS t_ecs_dense;
+CREATE TABLE t_ecs_dense (k UInt8, f Nullable(FixedString(4000)) CODEC(LZ4)) ENGINE = MergeTree PARTITION BY k ORDER BY tuple()
+SETTINGS min_bytes_for_wide_part = 0, ratio_of_defaults_for_sparse_serialization = 0.5;
+INSERT INTO t_ecs_dense SELECT number % 2, if(number % 50 = 0, toFixedString(toString(number), 4000), NULL) FROM numbers(1000);
+SELECT k, column_data_compressed_bytes = estimate AS matches_on_disk_size
+FROM system.parts_columns
+INNER JOIN (SELECT k, estimateCompressedSize('Nullable(FixedString(4000))', 'LZ4')(f) AS estimate FROM t_ecs_dense GROUP BY k) AS estimates ON toUInt8(partition) = k
+WHERE table = 't_ecs_dense' AND active AND column = 'f'
+ORDER BY k;
+" -- --merge_tree.index_granularity_bytes=4096

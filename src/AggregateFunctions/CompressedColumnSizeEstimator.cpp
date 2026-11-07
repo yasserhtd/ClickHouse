@@ -214,6 +214,19 @@ void CompressedColumnSizeEstimator::Writer::write(const IColumn & rows, size_t o
             MergeTreeDataPartWriterOnDisk::setVectorDimensionsIfNeeded(codec, written.get());
     }
 
+    /// As `MergeTreeDataPartWriterWide::write` adjusts the open mark when a block needs smaller granules than the rows left in
+    /// it: the mark closes where it stands when it already holds that many rows, else it shrinks to the block's granule.
+    if (rows_in_granule > 0 && open_granule_rows - rows_in_granule > granule_rows)
+    {
+        if (rows_in_granule >= granule_rows)
+        {
+            endGranule();
+            rows_in_granule = 0;
+        }
+        else
+            open_granule_rows = granule_rows;
+    }
+
     for (size_t end = offset + limit; offset < end;)
     {
         if (rows_in_granule == 0)

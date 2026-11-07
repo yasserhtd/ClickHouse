@@ -304,6 +304,23 @@ private:
         }
     }
 
+    /// A buffer that holds the open granule of the state meets a block whose granules are smaller than the rows the granule
+    /// has left: as the writer adjusts its open mark, the granule closes where it stands when it already holds that many rows,
+    /// else it shrinks to the granule of the block.
+    void adjustOpenGranule(Data & data_ref, size_t block_granule_rows) const
+    {
+        if (!data_ref.buffer || data_ref.buffer->empty() || !holdsGranules(data_ref) || data_ref.buffer_granule_rows == 0)
+            return;
+        const size_t rows = data_ref.buffer->size();
+        if (data_ref.buffer_granule_rows - std::min(data_ref.buffer_granule_rows, rows) > block_granule_rows)
+        {
+            if (rows >= block_granule_rows)
+                flushBuffer(data_ref);
+            else
+                data_ref.buffer_granule_rows = block_granule_rows;
+        }
+    }
+
     /// Adds one row to the buffer of the state, which is flushed when it holds a granule (sized by the rows the block gives the
     /// state, see `sizeGranulesByBlock`), or a batch of one when the type allows (`rows_per_batch`). The per-row path of a
     /// `GROUP BY`: only the first row of a buffer and the last one leave it.
@@ -349,6 +366,7 @@ private:
         }
 
         startBufferOfKind(data_ref, rows.isSparse());
+        adjustOpenGranule(data_ref, granule_rows);
         if (data_ref.buffer && !data_ref.buffer->empty())
         {
             if (data_ref.buffer_granule_rows == 0)
@@ -503,6 +521,7 @@ private:
             data_ref.block_granule_rows = estimator.granuleRows(data_ref.block_rows, bytes);
             data_ref.block_rows = 0;
             data_ref.block_bytes = 0;
+            adjustOpenGranule(data_ref, data_ref.block_granule_rows);
             /// A buffer that holds a batch of a granule, not the granule, takes the size at its next flush (see `flushBuffer`).
             if (!data_ref.buffer || data_ref.buffer->empty() || !holdsGranules(data_ref))
                 data_ref.buffer_granule_rows = data_ref.block_granule_rows;
@@ -514,20 +533,25 @@ private:
     void addRowsToPlaces(
         size_t row_begin, size_t row_end, AggregateDataPtr * places, size_t place_offset, const IColumn & column, const UInt8 * flags) const
     {
-        sizeGranulesByBlock(row_begin, row_end, places, place_offset, column, flags);
+        /// A sparse column that a table would store dense is dense from here on: it is sized and added as the writer gets it.
+        ColumnPtr dense;
+        const IColumn * rows = &column;
+        if (column.isSparse() && !sparse_allowed)
+        {
+            dense = recursiveRemoveSparse(column.getPtr());
+            rows = dense.get();
+        }
 
-        const bool densify = column.isSparse() && !sparse_allowed;
-        const bool rows_are_sparse = column.isSparse() && !densify;
+        sizeGranulesByBlock(row_begin, row_end, places, place_offset, *rows, flags);
+
+        const bool rows_are_sparse = rows->isSparse();
         for (size_t i = row_begin; i < row_end; ++i)
         {
             if (!places[i] || (flags && !flags[i]))
                 continue;
             AggregateDataPtr place = places[i] + place_offset;
             startBufferOfKind(data(place), rows_are_sparse);
-            if (densify)
-                addRowDense(place, column, i);
-            else
-                addRow(place, column, i);
+            addRow(place, *rows, i);
         }
     }
 
@@ -834,7 +858,7 @@ The result is the number of bytes the column would take on disk (`column_data_co
 
 The function has no table, so what the writer takes from a table it takes from the server's MergeTree settings (the `merge_tree` section of the configuration): the serialization versions of `String`, `Nullable` and `Map`, the layouts of `Dynamic`, `JSON` and `Variant` as a merged part stores them, the map buckets, `index_granularity`, `index_granularity_bytes`, `min_compress_block_size`, `max_compress_block_size`, and the adaptive write buffers: of the substreams of `Dynamic` and `JSON`, and of every substream when this column alone has `min_columns_to_activate_adaptive_write_buffer` streams (a table with other columns may reach that number without this column, which the function cannot tell). Without the `codec` parameter, the codec is the one the server gives a large merged part: the `default_compression_codec` MergeTree setting when it is set, else the `compression` section of the configuration, else `ZSTD(3)`. From the query it takes `low_cardinality_max_dictionary_size`, `low_cardinality_use_single_dictionary_for_part`, and the compressed block sizes when the MergeTree settings leave them unset. The settings of a particular table are not known to the function, and the granule size is estimated from this column alone, while a table sizes its granules by all its columns.
 
-The rows of each `GROUP BY` group and of each window frame are serialized as if they were a part of their own, so the result also depends on how the rows are split between groups, threads and frames. The condition of the `-If` combinator has to be `UInt8` (`ifNull(cond, 0)` for a `Nullable` one), since the function handles `Nullable` arguments itself, as `estimateCompressionRatio` does. Each state holds the rows it has not serialized yet (up to a granule for `LowCardinality`, `Dynamic`, `JSON`, `Map` and sparse columns, a batch of 2048 rows for the other types) and, once it has serialized a granule, one compression buffer per substream, which grows with the data up to the compressed block size. A `GROUP BY` with many groups therefore needs more memory than with most aggregate functions: in the order of 100 KiB per group holding a granule or more of a `String` column, and the rows of the group below that. A column that a table stores sparse is estimated sparse, except through the `-If` combinator, which receives it dense.
+The rows of each `GROUP BY` group and of each window frame are serialized as if they were a part of their own, so the result also depends on how the rows are split between groups, threads and frames. The granules of a group are sized by the rows each block gives it, as the granules of a partition are by its rows of a block; for the types whose rows share something (the dictionary of a `LowCardinality` column, the defaults of a sparse column), the group's rows are sized as their share of the block, so groups whose dictionaries differ a lot in one block may get granules of another size than their parts. A granule left open by a block and closed early by the next one, whose rows are much wider, may cost one compressed block more than in a part. The condition of the `-If` combinator has to be `UInt8` (`ifNull(cond, 0)` for a `Nullable` one), since the function handles `Nullable` arguments itself, as `estimateCompressionRatio` does. Each state holds the rows it has not serialized yet (up to a granule for `LowCardinality`, `Dynamic`, `JSON`, `Map` and sparse columns, a batch of 2048 rows for the other types) and, once it has serialized a granule, one compression buffer per substream, which grows with the data up to the compressed block size. A `GROUP BY` with many groups therefore needs more memory than with most aggregate functions: in the order of 100 KiB per group holding a granule or more of a `String` column, and the rows of the group below that. A column that a table stores sparse is estimated sparse, except through the `-If` combinator, which receives it dense.
 
 The intermediate state records the size only: merging the states of several groups gives the sum of their sizes, as the parts they would be. A window function with a growing frame (`ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`) gives a result after every row, and each result closes the part of its state, so every row added after the first result is serialized as a part of its own, with its own headers; the size of all the rows of a frame stored as one part is the result for the whole frame (`OVER ()`) or of the aggregate. `estimateCompressionRatio` behaves the same way.
 
