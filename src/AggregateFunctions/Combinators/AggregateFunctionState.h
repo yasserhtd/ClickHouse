@@ -127,7 +127,7 @@ public:
     }
 
     /// A sparse column reaches the nested function as it is, so that a function that measures its representation
-    /// (`estimateCompressionRatio`) sees it with `-State` as without.
+    /// (`estimateCompressedSize`) sees it with `-State` as without.
     void addBatchSparse(
         size_t row_begin, size_t row_end, AggregateDataPtr * places, size_t place_offset, const IColumn ** columns, Arena * arena) const override
     {

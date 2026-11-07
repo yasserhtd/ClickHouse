@@ -19,7 +19,7 @@ struct Settings;
 /** Measures the on-disk size of a column as `MergeTreeDataPartWriterWide` writes a column of a wide part: one compressed
   * stream per substream, the codec of the column for its data substreams and only its generic codecs for the structural ones
   * (null map, array sizes, dictionary indexes), the serialization settings of the writer, and the rows written one granule
-  * at a time. Used by `estimateCompressionRatio`.
+  * at a time. Used by `estimateCompressedSize`.
   */
 class CompressedColumnSizeEstimator
 {
@@ -52,12 +52,6 @@ public:
         static WriterSettings fromServer(const Settings * query_settings);
     };
 
-    struct Sizes
-    {
-        UInt64 uncompressed = 0;
-        UInt64 compressed = 0;
-    };
-
     /// Writes the rows of one column of one part: the prefix, the granules, the suffix. Heap-allocated and not movable, since the
     /// stream getter holds its address.
     class Writer
@@ -74,8 +68,9 @@ public:
         /// `MergeTreeDataPartWriterOnDisk::prepareBlockForWriting` does.
         void write(const IColumn & rows, size_t offset, size_t limit, size_t granule_rows);
 
-        /// The suffix (the dictionary of a `LowCardinality` column, statistics) and the last compressed block of every stream.
-        Sizes finish();
+        /// The suffix (the dictionary of a `LowCardinality` column, statistics) and the last compressed block of every stream;
+        /// returns the compressed bytes of the column.
+        UInt64 finish();
 
     private:
         friend class CompressedColumnSizeEstimator;
@@ -114,7 +109,8 @@ public:
     const DataTypePtr & getType() const { return type; }
     const WriterSettings & getSettings() const { return settings; }
 
-    /// Rows of a granule of `column`, as `computeIndexGranularity` sizes the granules of a table that has this column alone.
+    /// Rows of a granule of a block of `column`, as `computeIndexGranularity` sizes the granules of a table that has this column
+    /// alone.
     size_t granuleRows(const IColumn & column) const;
 
     /// A writer with a compressed stream per substream of `column`, after the prefix.

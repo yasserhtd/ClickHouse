@@ -9,6 +9,7 @@
 #include <Formats/MarkInCompressedFile.h>
 #include <Interpreters/Context.h>
 #include <Storages/MergeTree/MergeTreeDataPartType.h>
+#include <Storages/MergeTree/MergeTreeIndexGranularity.h>
 #include <Storages/MergeTree/MergeTreeSettings.h>
 #include <Common/CurrentThread.h>
 #include <Common/Exception.h>
@@ -240,7 +241,7 @@ void CompressedColumnSizeEstimator::Writer::endGranule()
             stream.calculator->endBlock();
 }
 
-CompressedColumnSizeEstimator::Sizes CompressedColumnSizeEstimator::Writer::finish()
+UInt64 CompressedColumnSizeEstimator::Writer::finish()
 {
     chassert(!finished);
     finished = true;
@@ -248,15 +249,14 @@ CompressedColumnSizeEstimator::Sizes CompressedColumnSizeEstimator::Writer::fini
     serialization->serializeBinaryBulkStateSuffix(settings, state);
     state.reset();
 
-    Sizes sizes;
+    UInt64 compressed = 0;
     for (auto & stream : streams)
     {
         stream.calculator->finalize();
-        sizes.uncompressed += stream.calculator->getUncompressedBytes();
-        sizes.compressed += stream.calculator->getCompressedBytes();
+        compressed += stream.calculator->getCompressedBytes();
     }
     streams.clear();
-    return sizes;
+    return compressed;
 }
 
 CompressedColumnSizeEstimator::CompressedColumnSizeEstimator(
@@ -298,12 +298,16 @@ CompressedColumnSizeEstimator::StreamLayout CompressedColumnSizeEstimator::resol
 
 size_t CompressedColumnSizeEstimator::granuleRows(const IColumn & column) const
 {
-    /// The writer counts the bytes of all columns of the table, so the granules of a table with wide rows are smaller.
-    if (settings.index_granularity_bytes == 0)
+    /// The writer counts the bytes of all columns of the block, so the granules of a table with wide rows are smaller.
+    if (column.empty())
         return settings.index_granularity;
-
-    const size_t bytes_per_row = std::max<size_t>(column.byteSize() / std::max<size_t>(column.size(), 1), 1);
-    return std::clamp<size_t>(settings.index_granularity_bytes / bytes_per_row, 1, settings.index_granularity);
+    return computeIndexGranularity(
+        column.size(),
+        column.byteSize(),
+        settings.index_granularity_bytes,
+        settings.index_granularity,
+        /*blocks_are_granules=*/ false,
+        /*can_use_adaptive_index_granularity=*/ settings.index_granularity_bytes != 0);
 }
 
 std::unique_ptr<CompressedColumnSizeEstimator::Writer> CompressedColumnSizeEstimator::startWriter(const IColumn & column) const

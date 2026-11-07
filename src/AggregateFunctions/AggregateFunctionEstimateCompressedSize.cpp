@@ -172,15 +172,15 @@ private:
         return settings;
     }
 
-    /// Ends the run as the writer ends a part. Idempotent.
+    /// Ends the run as the writer ends a part. Idempotent, also after an exception: the writer is finished once.
     static void finishRun(Run & run)
     {
         if (run.finished)
             return;
 
-        run.compressed_bytes += run.writer->finish().compressed;
-        run.writer.reset();
         run.finished = true;
+        auto writer = std::move(run.writer);
+        run.compressed_bytes += writer->finish();
     }
 
     /// The current run, or a new one when there is none, when the state was read, or when the representation changed.
@@ -253,18 +253,28 @@ private:
         }
     }
 
-    /// Adds one row to the buffer of the state, which is flushed when it holds a granule. The per-row path of a `GROUP BY`: only
-    /// the first row of a state and the last one of a granule leave it.
+    /// Adds one row to the buffer of the state, which is flushed when it holds a granule, sized by the block the row comes from
+    /// as the writer sizes the granules of a block. The per-row path of a `GROUP BY`: only the first row of a granule and the
+    /// last one leave it.
     ALWAYS_INLINE void addRow(AggregateDataPtr __restrict place, const IColumn & column, size_t row_num) const
     {
         Data & data_ref = data(place);
         if (unlikely(!data_ref.buffer))
             bufferFor(data_ref, column);
+        if (unlikely(data_ref.buffer_granule_rows == 0))
+            data_ref.buffer_granule_rows = estimator.granuleRows(column);
         IColumn & buffer = *data_ref.buffer;
         buffer.insertFrom(column, row_num);
 
-        if (unlikely(buffer.size() >= estimator.granuleRows(buffer)))
+        if (unlikely(buffer.size() >= data_ref.buffer_granule_rows))
             flushBuffer(data_ref);
+    }
+
+    /// The rows of a sparse column that a table would store dense are added from its values: the buffer takes dense rows.
+    ALWAYS_INLINE void addRowDense(AggregateDataPtr __restrict place, const IColumn & column, size_t row_num) const
+    {
+        const auto & sparse = assert_cast<const ColumnSparse &>(column);
+        addRow(place, sparse.getValuesColumn(), sparse.getValueIndex(row_num));
     }
 
     /// Serializes rows after the rows added one at a time. The rows that do not complete a granule either wait in the buffer for
@@ -394,8 +404,12 @@ public:
 
     void add(AggregateDataPtr __restrict place, const IColumn ** columns, size_t row_num, Arena *) const override
     {
-        startBufferOfKind(data(place), columns[0]->isSparse());
-        addRow(place, *columns[0], row_num);
+        const bool rows_are_sparse = columns[0]->isSparse() && sparse_allowed;
+        startBufferOfKind(data(place), rows_are_sparse);
+        if (rows_are_sparse || !columns[0]->isSparse())
+            addRow(place, *columns[0], row_num);
+        else
+            addRowDense(place, *columns[0], row_num);
     }
 
     /// As the inherited version, with the kind of the rows looked up once for the block rather than once per row.
@@ -409,7 +423,8 @@ public:
         ssize_t if_argument_pos) const override
     {
         const IColumn & column = *columns[0];
-        const bool rows_are_sparse = column.isSparse();
+        const bool densify = column.isSparse() && !sparse_allowed;
+        const bool rows_are_sparse = column.isSparse() && !densify;
         const UInt8 * flags = if_argument_pos >= 0 ? assert_cast<const ColumnUInt8 &>(*columns[if_argument_pos]).getData().data() : nullptr;
         for (size_t i = row_begin; i < row_end; ++i)
         {
@@ -417,7 +432,10 @@ public:
                 continue;
             AggregateDataPtr place = places[i] + place_offset;
             startBufferOfKind(data(place), rows_are_sparse);
-            addRow(place, column, i);
+            if (densify)
+                addRowDense(place, column, i);
+            else
+                addRow(place, column, i);
         }
     }
 
@@ -624,7 +642,7 @@ See [Column Compression Codecs](/reference/statements/create/table#column_compre
         R"(
 CREATE TABLE compression_estimate_strings
 (
-    `s` String
+    `s` String CODEC(LZ4)
 )
 ENGINE = MergeTree()
 ORDER BY tuple()
@@ -666,9 +684,10 @@ FROM (SELECT toIPv4(number * 7919) AS ip FROM numbers(100000))
     {
         "The estimate of an existing column against its size on disk",
         R"(
--- The column was written with the default codec of the server, which the estimate without a codec parameter uses as well.
+-- The estimate takes the codec of the column; without the codec parameter it would take the codec the server gives a large
+-- merged part, which a small part may not have been written with.
 SELECT
-    (SELECT estimateCompressedSize(s) FROM compression_estimate_strings) AS estimate,
+    (SELECT estimateCompressedSize('LZ4')(s) FROM compression_estimate_strings) AS estimate,
     column_data_compressed_bytes AS on_disk
 FROM system.parts_columns
 WHERE database = currentDatabase() AND table = 'compression_estimate_strings' AND column = 's' AND active

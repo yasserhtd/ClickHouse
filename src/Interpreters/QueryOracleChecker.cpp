@@ -193,8 +193,9 @@ const std::unordered_set<String> & nonDeterministicFunctions()
         /// points: on ties in the x argument which point wins is merge-order
         /// dependent, and the ratio is a Float64 either way.
         "boundingRatio",
-        /// Depends on physical data layout, not values.
+        /// Depend on physical data layout, not values.
         "estimateCompressionRatio",
+        "estimateCompressedSize",
         /// Statistical hypothesis-test / correlation aggregates: they return
         /// floating-point statistics or p-values computed with rank/tie handling
         /// and non-associative summation, so the State/Merge, DQP and

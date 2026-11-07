@@ -18,7 +18,7 @@ namespace DB
 /// memory. A block ends when it reaches `block_size`, at `endBlock`, at `finalize`, and at an explicit `next` from the
 /// serialization, as on the stream of the MergeTree writer, a `HashingWriteBuffer` that passes `next` to its
 /// `CompressedWriteBuffer`. An explicit `next` that finds the buffer exactly full is taken for a write that did not fit.
-/// After a grow the working buffer begins behind the bytes kept, so `offset()` is not the size of the open block: `blockBytes` is.
+/// After a grow the working buffer begins behind the bytes kept, so `offset` is not the size of the open block: `blockBytes` is.
 ///
 /// With `adaptive_initial_size` the buffer is adaptive, as the writer's `CompressedWriteBuffer` for a dynamic substream: it
 /// starts at that size, a block ends whenever the buffer is full, and the buffer doubles after such a block up to `block_size`.
