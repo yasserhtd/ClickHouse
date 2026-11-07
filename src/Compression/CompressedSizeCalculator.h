@@ -58,7 +58,6 @@ private:
     const bool adaptive;
     /// Set while a block is ended on purpose, so that `nextImpl` compresses instead of growing.
     bool closing = false;
-    PODArray<char> scratch;
     UInt64 compressed_total = 0;
 };
 

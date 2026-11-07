@@ -20,9 +20,12 @@ size_t initialBufferSize(size_t block_size, size_t adaptive_initial_size)
 }
 
 /// Compressed size of a single block as `compress` would produce it (block header + payload).
-/// If possible, calculate output size cheaply. If not, compress into a scratch buffer and keep only the returned size.
-UInt32 getCompressedBlockSize(const ICompressionCodec & codec, const char * src, UInt32 src_size, PODArray<char> & scratch)
+/// If possible, calculate output size cheaply. If not, compress into a scratch buffer and keep only the returned size. The
+/// scratch lives for one block: a `GROUP BY` holds one calculator per substream of every group, and most of them never
+/// compress between two blocks.
+UInt32 getCompressedBlockSize(const ICompressionCodec & codec, const char * src, UInt32 src_size)
 {
+    PODArray<char> scratch;
     if (auto calculated = codec.tryGetCompressedSize(src, src_size))
         return ICompressionCodec::getHeaderSize() + *calculated;
 
@@ -74,7 +77,7 @@ void CompressedSizeCalculator::compressBlock(size_t size)
     chassert(size <= INT_MAX);
     /// On-disk block layout must match CompressedWriteBuffer::nextImpl (checksum + header + payload)
     compressed_total
-        += sizeof(CityHash_v1_0_2::uint128) + getCompressedBlockSize(*codec, memory.data(), static_cast<UInt32>(size), scratch);
+        += sizeof(CityHash_v1_0_2::uint128) + getCompressedBlockSize(*codec, memory.data(), static_cast<UInt32>(size));
     working_buffer = internal_buffer;
     /// `next` resets `pos` itself; `endBlock` reaches here without it, and `count` adds `offset` to the bytes counted.
     pos = working_buffer.begin();
