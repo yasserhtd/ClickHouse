@@ -89,6 +89,9 @@ States and combinators
 AggregateFunction(estimateCompressedSize(\'LowCardinality(String)\', \'LZ4\', 65536), String)
 1
 1	1
+4761183170873013810	500	31
+10577349846663553072	500	31
+1
 1
 Window functions
 0	0	1

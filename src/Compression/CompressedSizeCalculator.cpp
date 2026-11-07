@@ -14,8 +14,10 @@ namespace
 /// The buffer grows from this size by doubling, up to the block size.
 constexpr size_t initial_buffer_size = 16 * 1024;
 
-size_t initialBufferSize(size_t block_size, size_t adaptive_initial_size)
+size_t initialBufferSize(size_t block_size, size_t adaptive_initial_size, bool grow)
 {
+    if (!grow)
+        return block_size;
     return std::min(block_size, adaptive_initial_size ? adaptive_initial_size : initial_buffer_size);
 }
 
@@ -35,8 +37,8 @@ UInt32 getCompressedBlockSize(const ICompressionCodec & codec, const char * src,
 
 }
 
-CompressedSizeCalculator::CompressedSizeCalculator(CompressionCodecPtr codec_, size_t block_size_, size_t adaptive_initial_size_)
-    : BufferWithOwnMemory<WriteBuffer>(initialBufferSize(block_size_, adaptive_initial_size_))
+CompressedSizeCalculator::CompressedSizeCalculator(CompressionCodecPtr codec_, size_t block_size_, size_t adaptive_initial_size_, bool grow_)
+    : BufferWithOwnMemory<WriteBuffer>(initialBufferSize(block_size_, adaptive_initial_size_, grow_))
     , codec(std::move(codec_))
     , block_size(block_size_)
     , adaptive(adaptive_initial_size_ != 0)

@@ -475,6 +475,50 @@ public:
             addRow(place, *column, row);
     }
 
+    /// Adds the rows of [row_begin, row_end) that have a state and pass the condition of `-If` (`flags`), converted once for the
+    /// block. Only those rows are converted: a rejected row need not fit the target type.
+    void addBatchConverted(
+        size_t row_begin,
+        size_t row_end,
+        AggregateDataPtr * places,
+        size_t place_offset,
+        const IColumn & column,
+        const UInt8 * flags,
+        bool places_are_non_null) const
+    {
+        if (!conversion)
+        {
+            addRowsToPlaces(row_begin, row_end, places, place_offset, column, flags);
+            return;
+        }
+
+        const size_t rows = row_end - row_begin;
+        if (!flags && places_are_non_null)
+        {
+            const ColumnPtr converted = convertRows((row_begin == 0 && rows == column.size()) ? column.getPtr() : column.cut(row_begin, rows));
+            addRowsToPlaces(0, rows, places + row_begin, place_offset, *converted, nullptr);
+            return;
+        }
+
+        IColumn::Filter filter(rows);
+        PODArray<AggregateDataPtr> admitted_places;
+        for (size_t i = row_begin; i < row_end; ++i)
+        {
+            const bool admitted = places[i] && (!flags || flags[i]);
+            filter[i - row_begin] = admitted;
+            if (admitted)
+                admitted_places.push_back(places[i]);
+        }
+        if (admitted_places.empty())
+            return;
+
+        ColumnPtr admitted = column.cut(row_begin, rows);
+        if (admitted_places.size() != rows)
+            admitted = admitted->filter(filter, admitted_places.size());
+        const ColumnPtr converted = convertRows(admitted);
+        addRowsToPlaces(0, admitted_places.size(), admitted_places.data(), place_offset, *converted, nullptr);
+    }
+
     /// As the inherited versions, with the rows converted once for the block. The aggregator calls `addBatchWithNonNullPlaces`
     /// when every row has a state, `addBatch` otherwise; the inherited versions of both add the rows one at a time with `add`.
     void addBatch(
@@ -487,8 +531,7 @@ public:
         ssize_t if_argument_pos) const override
     {
         const UInt8 * flags = if_argument_pos >= 0 ? assert_cast<const ColumnUInt8 &>(*columns[if_argument_pos]).getData().data() : nullptr;
-        const ColumnPtr converted = convertRows(columns[0]->getPtr());
-        addRowsToPlaces(row_begin, row_end, places, place_offset, *converted, flags);
+        addBatchConverted(row_begin, row_end, places, place_offset, *columns[0], flags, /*places_are_non_null=*/ false);
     }
 
     void addBatchWithNonNullPlaces(
@@ -497,10 +540,11 @@ public:
         AggregateDataPtr * places,
         size_t place_offset,
         const IColumn ** columns,
-        Arena * arena,
+        Arena *,
         ssize_t if_argument_pos) const override
     {
-        addBatch(row_begin, row_end, places, place_offset, columns, arena, if_argument_pos);
+        const UInt8 * flags = if_argument_pos >= 0 ? assert_cast<const ColumnUInt8 &>(*columns[if_argument_pos]).getData().data() : nullptr;
+        addBatchConverted(row_begin, row_end, places, place_offset, *columns[0], flags, /*places_are_non_null=*/ true);
     }
 
     void addBatchSinglePlace(
@@ -536,8 +580,7 @@ public:
     void addBatchSparse(
         size_t row_begin, size_t row_end, AggregateDataPtr * places, size_t place_offset, const IColumn ** columns, Arena *) const override
     {
-        const ColumnPtr converted = convertRows(columns[0]->getPtr());
-        addRowsToPlaces(row_begin, row_end, places, place_offset, *converted, nullptr);
+        addBatchConverted(row_begin, row_end, places, place_offset, *columns[0], nullptr, /*places_are_non_null=*/ false);
     }
 
     void mergeImpl(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena *) const override

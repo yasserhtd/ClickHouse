@@ -22,11 +22,14 @@ namespace DB
 ///
 /// With `adaptive_initial_size` the buffer is adaptive, as the writer's `CompressedWriteBuffer` for a dynamic substream: it
 /// starts at that size, a block ends whenever the buffer is full, and the buffer doubles after such a block up to `block_size`.
+///
+/// Without `grow` the buffer is `block_size` from the start, as the writer's: for a serialization that cuts its blocks itself by
+/// reading `offset` of the stream and calling `next` (the shared data of `JSON`), which must see the buffer the writer has.
 class CompressedSizeCalculator : public BufferWithOwnMemory<WriteBuffer>
 {
 public:
     explicit CompressedSizeCalculator(
-        CompressionCodecPtr codec_ = nullptr, size_t block_size_ = DBMS_DEFAULT_BUFFER_SIZE, size_t adaptive_initial_size_ = 0);
+        CompressionCodecPtr codec_ = nullptr, size_t block_size_ = DBMS_DEFAULT_BUFFER_SIZE, size_t adaptive_initial_size_ = 0, bool grow_ = true);
 
     /// Total on-disk size of the streamed input (not a single block). Call `finalize` first.
     /// Per block: 16-byte checksum + block header + compressed payload.

@@ -120,12 +120,15 @@ public:
     std::unique_ptr<Writer> startWriter(const IColumn & column) const;
 
 private:
-    /// The codec and the compressed block size of a substream, and the initial size of its buffer when it is adaptive.
+    /// The codec and the compressed block size of a substream, the initial size of its buffer when it is adaptive, and whether
+    /// its serialization cuts the blocks itself by the offset of the stream (the shared data of `JSON`): then a buffer that is
+    /// not adaptive has to be the whole block from the start, as the writer's (see `CompressedSizeCalculator`).
     struct StreamLayout
     {
         CompressionCodecPtr codec;
         size_t block_size = 0;
         size_t adaptive_initial_size = 0;
+        bool cuts_blocks_itself = false;
     };
 
     StreamLayout resolveStreamLayout(const ISerialization::SubstreamPath & path) const;

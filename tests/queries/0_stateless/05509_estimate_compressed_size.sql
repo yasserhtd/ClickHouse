@@ -502,6 +502,10 @@ SELECT
     estimateCompressedSizeIf('LowCardinality(String)', 'LZ4', 65536)(s, k = 3) = 0
 FROM t_ecs;
 
+-- With keys, only the rows that pass the condition are converted: a rejected row need not fit the target type.
+SELECT k, count(), estimateCompressedSizeIf('UInt8', 'LZ4')(number, number < 10) FROM (SELECT intHash64(number % 2) AS k, number FROM numbers(1000)) GROUP BY k ORDER BY k;
+SELECT estimateCompressedSizeIf('UInt8', 'LZ4')(number, number < 10) = estimateCompressedSize('UInt8', 'LZ4')(toUInt8(number)) FROM numbers(10);
+
 -- -Array adds the elements one at a time.
 SELECT estimateCompressedSizeArray('LowCardinality(String)', 'LZ4', 65536)(arr) = (SELECT estimateCompressedSize('LowCardinality(String)', 'LZ4', 65536)(arrayJoin(arr)) FROM (SELECT [s, s] AS arr FROM t_ecs))
 FROM (SELECT [s, s] AS arr FROM t_ecs);
