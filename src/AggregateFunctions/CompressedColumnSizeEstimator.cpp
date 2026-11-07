@@ -274,20 +274,14 @@ CompressedColumnSizeEstimator::CompressedColumnSizeEstimator(
 {
     auto serialization = type->getSerialization(settings.serialization_info);
     auto enumerate_settings = settings.enumerate;
-    VectorWithMemoryTracking<ISerialization::SubstreamPath> paths;
     serialization->enumerateStreams(
         enumerate_settings,
         [&](const ISerialization::SubstreamPath & path)
         {
             if (!ISerialization::isEphemeralSubcolumn(path, path.size()))
-                paths.push_back(path);
+                stream_layouts.emplace(ISerialization::getSubstreamsCacheKeyForStream(path), resolveStreamLayout(path));
         },
         ISerialization::SubstreamData(serialization).withType(type));
-
-    /// As `MergeTreeDataPartWriterWide::addStreams` compares the streams of the part with the threshold.
-    all_streams_adaptive = settings.adaptive_buffer_min_streams != 0 && paths.size() >= settings.adaptive_buffer_min_streams;
-    for (const auto & path : paths)
-        stream_layouts.emplace(ISerialization::getSubstreamsCacheKeyForStream(path), resolveStreamLayout(path));
 }
 
 CompressedColumnSizeEstimator::StreamLayout CompressedColumnSizeEstimator::resolveStreamLayout(const ISerialization::SubstreamPath & path) const
@@ -303,7 +297,7 @@ CompressedColumnSizeEstimator::StreamLayout CompressedColumnSizeEstimator::resol
     layout.codec = CompressionCodecFactory::instance().get(
         codec_description, is_data_substream ? substream_type.get() : nullptr, default_codec, /*only_generic=*/ !is_data_substream);
     layout.block_size = whole_values(settings.max_compress_block_size);
-    if (all_streams_adaptive || (settings.adaptive_buffer_for_dynamic_subcolumns && ISerialization::isDynamicSubcolumn(path, path.size())))
+    if (settings.adaptive_buffer_for_dynamic_subcolumns && ISerialization::isDynamicSubcolumn(path, path.size()))
         layout.adaptive_initial_size = whole_values(settings.adaptive_buffer_initial_size);
     const auto substream = path.back().type;
     layout.cuts_blocks_itself = substream == ISerialization::Substream::ObjectSharedDataData
@@ -318,7 +312,7 @@ size_t CompressedColumnSizeEstimator::granuleRows(const IColumn & column) const
         return settings.index_granularity;
     return computeIndexGranularity(
         column.size(),
-        column.byteSize(),
+        getColumnSizeForGranularity(column),
         settings.index_granularity_bytes,
         settings.index_granularity,
         /*blocks_are_granules=*/ false,
@@ -332,28 +326,43 @@ std::unique_ptr<CompressedColumnSizeEstimator::Writer> CompressedColumnSizeEstim
 
     Writer * raw = writer.get();
     auto enumerate_settings = settings.enumerate;
+    VectorWithMemoryTracking<ISerialization::SubstreamPath> paths;
     serialization->enumerateStreams(
         enumerate_settings,
         [&](const ISerialization::SubstreamPath & path)
         {
-            if (ISerialization::isEphemeralSubcolumn(path, path.size()))
-                return;
-
-            const String key = ISerialization::getSubstreamsCacheKeyForStream(path);
-            auto it = stream_layouts.find(key);
-            const StreamLayout layout = it != stream_layouts.end() ? it->second : resolveStreamLayout(path);
-            CompressionCodecPtr codec = layout.codec;
-            if (codec->needsVectorDimensionUpfront())
-            {
-                /// The dimension is set on the codec: an instance of this writer, not the shared one.
-                codec = resolveStreamLayout(path).codec;
-                raw->vector_codecs.push_back(codec);
-            }
-            const bool grow = !(layout.cuts_blocks_itself && layout.adaptive_initial_size == 0);
-            raw->streams.push_back(
-                {key, std::make_unique<CompressedSizeCalculator>(codec, layout.block_size, layout.adaptive_initial_size, grow)});
+            if (!ISerialization::isEphemeralSubcolumn(path, path.size()))
+                paths.push_back(path);
         },
         ISerialization::SubstreamData(serialization).withType(type).withColumn(column.getPtr()));
+
+    /// As `MergeTreeDataPartWriterWide::addStreams`: a part with `min_columns_to_activate_adaptive_write_buffer` streams or more
+    /// gives every stream an adaptive buffer. A part has at least the streams of this column, as the column reveals them; with
+    /// fewer streams here the other columns of a table may still make it, which the function cannot tell.
+    const bool all_streams_adaptive = settings.adaptive_buffer_min_streams != 0 && paths.size() >= settings.adaptive_buffer_min_streams;
+
+    for (const auto & path : paths)
+    {
+        const String key = ISerialization::getSubstreamsCacheKeyForStream(path);
+        auto it = stream_layouts.find(key);
+        const StreamLayout layout = it != stream_layouts.end() ? it->second : resolveStreamLayout(path);
+        CompressionCodecPtr codec = layout.codec;
+        if (codec->needsVectorDimensionUpfront())
+        {
+            /// The dimension is set on the codec: an instance of this writer, not the shared one.
+            codec = resolveStreamLayout(path).codec;
+            raw->vector_codecs.push_back(codec);
+        }
+        size_t adaptive_initial_size = layout.adaptive_initial_size;
+        if (all_streams_adaptive && adaptive_initial_size == 0)
+        {
+            const DataTypePtr & substream_type = path.back().data.type;
+            adaptive_initial_size = substream_type ? roundCompressBlockSizeToWholeValues(settings.adaptive_buffer_initial_size, *substream_type)
+                                                   : settings.adaptive_buffer_initial_size;
+        }
+        const bool grow = !(layout.cuts_blocks_itself && adaptive_initial_size == 0);
+        raw->streams.push_back({key, std::make_unique<CompressedSizeCalculator>(codec, layout.block_size, adaptive_initial_size, grow)});
+    }
     writer->settings.getter = [raw](const ISerialization::SubstreamPath & path) -> WriteBuffer * { return raw->calculatorFor(path); };
     writer->settings.stream_mark_getter = [raw](const ISerialization::SubstreamPath & path) { return raw->markFor(path); };
     writer->writePrefix(column);

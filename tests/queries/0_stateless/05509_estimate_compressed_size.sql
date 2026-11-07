@@ -10,6 +10,8 @@
 SET max_threads = 1, max_block_size = 8192, max_bytes_before_external_group_by = 0, max_bytes_ratio_before_external_group_by = 0;
 -- A table takes the compressed block sizes from the query when its own are not set, and so does the estimate.
 SET min_compress_block_size = 65536, max_compress_block_size = 1048576;
+-- The target type is checked as `accurateCast` checks its type: a LowCardinality of a number needs this setting.
+SET allow_suspicious_low_cardinality_types = 1;
 
 DROP TABLE IF EXISTS t_ecs;
 DROP TABLE IF EXISTS t_ecs_parts;
@@ -283,9 +285,13 @@ FROM numbers(1000)
 SETTINGS session_timezone = 'UTC';
 SET date_time_input_format = 'basic';
 
-SELECT 'Specialized codecs on the data substream';
+-- Also the overflow behaviour: a value out of the range of the target type is an error when `accurateCast` makes it one.
+SET date_time_overflow_behavior = 'throw';
+SELECT estimateCompressedSize('Date', 'LZ4')(toDate32('1900-01-01') + toIntervalDay(number)) FROM numbers(1000); -- { serverError VALUE_IS_OUT_OF_RANGE_OF_DATA_TYPE }
+SET date_time_overflow_behavior = 'ignore';
+SELECT estimateCompressedSize('Date', 'LZ4')(x) = estimateCompressedSize('Date', 'LZ4')(accurateCast(x, 'Date')) FROM (SELECT toDate32('1900-01-01') + toIntervalDay(number) AS x FROM numbers(1000));
 
-SET allow_suspicious_low_cardinality_types = 1;
+SELECT 'Specialized codecs on the data substream';
 
 DROP TABLE IF EXISTS t_ecs_t64;
 CREATE TABLE t_ecs_t64 (lc LowCardinality(UInt32) CODEC(T64), n Nullable(UInt32) CODEC(T64), arr Array(UInt32) CODEC(T64), dd UInt32 CODEC(DoubleDelta, LZ4), n64 Nullable(UInt64) CODEC(LZ4))

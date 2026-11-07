@@ -104,6 +104,8 @@ void fillIndexGranularityForCompactPart(
 /// state columns, whose true size Block::bytes() cannot report (their states live in shared arenas
 /// that ColumnAggregateFunction::byteSize() intentionally does not count).
 size_t getBlockSizeForGranularity(const Block & block);
+/// The same for one column.
+size_t getColumnSizeForGranularity(const IColumn & column);
 
 struct MergeTreeSettings;
 struct MergeTreeIndexGranularityInfo;

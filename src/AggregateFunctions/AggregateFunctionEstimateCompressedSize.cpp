@@ -155,13 +155,15 @@ private:
         return ast;
     }
 
-    /// The cast to `to`, with the conversion settings of the query (the cast takes a snapshot of them, the context is not kept);
-    /// `prepare` builds the converters and so rejects a conversion that does not exist.
+    /// The cast to `to`, as `accurateCast` casts in this query: the same resolver, with the conversion settings of the query, of
+    /// which the cast takes a snapshot (the context is not kept). `prepare` builds the converters and so rejects a conversion that
+    /// does not exist.
     static Conversion createCast(const DataTypePtr & from, const DataTypePtr & to, const ContextPtr & context)
     {
-        ColumnsWithTypeAndName arguments{{from->createColumn(), from, ""}, {nullptr, std::make_shared<DataTypeString>(), ""}};
+        const auto type_name = std::make_shared<DataTypeString>();
+        ColumnsWithTypeAndName arguments{{from->createColumn(), from, ""}, {type_name->createColumnConst(1, to->getName()), type_name, ""}};
         Conversion conversion;
-        conversion.function = createInternalCast(arguments[0], to, CastType::accurate, {}, context);
+        conversion.function = createCastOverloadResolver(context, CastType::accurate, {})->build(arguments);
         conversion.prepared = conversion.function->prepare(arguments);
         return conversion;
     }

@@ -139,10 +139,6 @@ private:
     const ASTPtr codec_description;
     const CompressionCodecPtr default_codec;
     const WriterSettings settings;
-    /// Whether this column alone has the streams that give every stream of a part an adaptive buffer. A part has at least the
-    /// streams of this column, so the writer would use them; with fewer streams here the other columns of a table may still
-    /// make it, which the function cannot tell.
-    bool all_streams_adaptive = false;
     /// A substream only a column reveals (sparse offsets, the variants of `Dynamic`) is resolved when a writer starts.
     UnorderedMapWithMemoryTracking<String, StreamLayout> stream_layouts;
 };

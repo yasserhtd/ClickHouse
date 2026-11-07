@@ -82,7 +82,7 @@ void MergeTreeIndexGranularity::addRowsToLastMark(size_t rows_count)
 /// but under-reports ColumnAggregateFunction leaves (pointer-only), so for every such leaf at any
 /// depth we add the serializedSizeEstimate()-vs-byteSize() delta. forEachSubcolumnRecursively does
 /// not visit the column itself, hence the explicit top-level call. Saturating: guard underflow.
-static size_t getColumnSizeForGranularity(const IColumn & column)
+size_t getColumnSizeForGranularity(const IColumn & column)
 {
     size_t res = column.byteSize();
 
