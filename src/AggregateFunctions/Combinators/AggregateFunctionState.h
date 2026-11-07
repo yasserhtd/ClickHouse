@@ -126,6 +126,20 @@ public:
         nested_func->add(place, columns, row_num, arena);
     }
 
+    /// A sparse column reaches the nested function as it is, so that a function that measures its representation
+    /// (`estimateCompressionRatio`) sees it with `-State` as without.
+    void addBatchSparse(
+        size_t row_begin, size_t row_end, AggregateDataPtr * places, size_t place_offset, const IColumn ** columns, Arena * arena) const override
+    {
+        nested_func->addBatchSparse(row_begin, row_end, places, place_offset, columns, arena);
+    }
+
+    void addBatchSparseSinglePlace(
+        size_t row_begin, size_t row_end, AggregateDataPtr __restrict place, const IColumn ** columns, Arena * arena) const override
+    {
+        nested_func->addBatchSparseSinglePlace(row_begin, row_end, place, columns, arena);
+    }
+
     void mergeImpl(AggregateDataPtr __restrict place, ConstAggregateDataPtr rhs, Arena * arena) const override
     {
         nested_func->merge(place, rhs, arena);
