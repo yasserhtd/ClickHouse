@@ -42,6 +42,7 @@ namespace MergeTreeSetting
     extern const MergeTreeSettingsMergeTreeMapSerializationVersion map_serialization_version;
     extern const MergeTreeSettingsNonZeroUInt64 max_buckets_in_map;
     extern const MergeTreeSettingsUInt64 max_compress_block_size;
+    extern const MergeTreeSettingsUInt64 min_columns_to_activate_adaptive_write_buffer;
     extern const MergeTreeSettingsUInt64 min_compress_block_size;
     extern const MergeTreeSettingsMergeTreeNullableSerializationVersion nullable_serialization_version;
     extern const MergeTreeSettingsMergeTreeObjectSerializationVersion object_serialization_version;
@@ -145,9 +146,9 @@ CompressedColumnSizeEstimator::WriterSettings CompressedColumnSizeEstimator::Wri
     /// The serializations that end compressed blocks themselves (the shared data of `JSON`) do so from this size on.
     bulk.min_compress_block_size = settings.min_compress_block_size;
 
-    /// As `MergeTreeDataPartWriterWide::addStreams`. A part with `min_columns_to_activate_adaptive_write_buffer` streams gives
-    /// every stream an adaptive buffer, which a single column cannot tell.
+    /// As `MergeTreeDataPartWriterWide::addStreams`.
     settings.adaptive_buffer_for_dynamic_subcolumns = merge_tree[MergeTreeSetting::use_adaptive_write_buffer_for_dynamic_subcolumns];
+    settings.adaptive_buffer_min_streams = merge_tree[MergeTreeSetting::min_columns_to_activate_adaptive_write_buffer];
     settings.adaptive_buffer_initial_size = merge_tree[MergeTreeSetting::adaptive_write_buffer_initial_size];
 
     return settings;
@@ -273,14 +274,20 @@ CompressedColumnSizeEstimator::CompressedColumnSizeEstimator(
 {
     auto serialization = type->getSerialization(settings.serialization_info);
     auto enumerate_settings = settings.enumerate;
+    VectorWithMemoryTracking<ISerialization::SubstreamPath> paths;
     serialization->enumerateStreams(
         enumerate_settings,
         [&](const ISerialization::SubstreamPath & path)
         {
             if (!ISerialization::isEphemeralSubcolumn(path, path.size()))
-                stream_layouts.emplace(ISerialization::getSubstreamsCacheKeyForStream(path), resolveStreamLayout(path));
+                paths.push_back(path);
         },
         ISerialization::SubstreamData(serialization).withType(type));
+
+    /// As `MergeTreeDataPartWriterWide::addStreams` compares the streams of the part with the threshold.
+    all_streams_adaptive = settings.adaptive_buffer_min_streams != 0 && paths.size() >= settings.adaptive_buffer_min_streams;
+    for (const auto & path : paths)
+        stream_layouts.emplace(ISerialization::getSubstreamsCacheKeyForStream(path), resolveStreamLayout(path));
 }
 
 CompressedColumnSizeEstimator::StreamLayout CompressedColumnSizeEstimator::resolveStreamLayout(const ISerialization::SubstreamPath & path) const
@@ -296,7 +303,7 @@ CompressedColumnSizeEstimator::StreamLayout CompressedColumnSizeEstimator::resol
     layout.codec = CompressionCodecFactory::instance().get(
         codec_description, is_data_substream ? substream_type.get() : nullptr, default_codec, /*only_generic=*/ !is_data_substream);
     layout.block_size = whole_values(settings.max_compress_block_size);
-    if (settings.adaptive_buffer_for_dynamic_subcolumns && ISerialization::isDynamicSubcolumn(path, path.size()))
+    if (all_streams_adaptive || (settings.adaptive_buffer_for_dynamic_subcolumns && ISerialization::isDynamicSubcolumn(path, path.size())))
         layout.adaptive_initial_size = whole_values(settings.adaptive_buffer_initial_size);
     const auto substream = path.back().type;
     layout.cuts_blocks_itself = substream == ISerialization::Substream::ObjectSharedDataData

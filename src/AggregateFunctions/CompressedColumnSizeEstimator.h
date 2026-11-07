@@ -42,8 +42,10 @@ public:
         size_t min_compress_block_size = DBMS_DEFAULT_BUFFER_SIZE;
         size_t max_compress_block_size = DBMS_DEFAULT_BUFFER_SIZE;
         /// The stream of a dynamic substream (a variant of `Dynamic`, a path of `JSON`) gets an adaptive buffer, whose blocks
-        /// start small (`use_adaptive_write_buffer_for_dynamic_subcolumns`, `adaptive_write_buffer_initial_size`).
+        /// start small (`use_adaptive_write_buffer_for_dynamic_subcolumns`, `adaptive_write_buffer_initial_size`); so does every
+        /// stream of a part with `min_columns_to_activate_adaptive_write_buffer` streams or more (0 never).
         bool adaptive_buffer_for_dynamic_subcolumns = true;
+        size_t adaptive_buffer_min_streams = 500;
         size_t adaptive_buffer_initial_size = DBMS_DEFAULT_INITIAL_ADAPTIVE_BUFFER_SIZE;
 
         /// The settings of a merged wide part of a table with the server's MergeTree settings (the `merge_tree` section of the
@@ -137,6 +139,10 @@ private:
     const ASTPtr codec_description;
     const CompressionCodecPtr default_codec;
     const WriterSettings settings;
+    /// Whether this column alone has the streams that give every stream of a part an adaptive buffer. A part has at least the
+    /// streams of this column, so the writer would use them; with fewer streams here the other columns of a table may still
+    /// make it, which the function cannot tell.
+    bool all_streams_adaptive = false;
     /// A substream only a column reveals (sparse offsets, the variants of `Dynamic`) is resolved when a writer starts.
     UnorderedMapWithMemoryTracking<String, StreamLayout> stream_layouts;
 };
