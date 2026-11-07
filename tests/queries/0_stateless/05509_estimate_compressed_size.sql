@@ -179,7 +179,7 @@ DROP TABLE IF EXISTS t_ecs_wide;
 CREATE TABLE t_ecs_wide (s String CODEC(LZ4)) ENGINE = MergeTree ORDER BY tuple()
 SETTINGS min_bytes_for_wide_part = 0, min_compress_block_size = 65536, max_compress_block_size = 65536, ratio_of_defaults_for_sparse_serialization = 1;
 
-INSERT INTO t_ecs_wide SELECT repeat(char(97 + number % 26), 2048) FROM numbers(8192);
+INSERT INTO t_ecs_wide SELECT repeat(char(97 + number % 26), 2000) FROM numbers(8192);
 
 SELECT column_data_compressed_bytes = estimate AS matches_on_disk_size
 FROM system.parts_columns
