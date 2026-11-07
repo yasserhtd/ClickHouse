@@ -25,7 +25,54 @@ s	Sparse	1
 The rows are serialized one granule at a time, whatever the block size
 1	1	1	1	1
 1
+Nullable, Array, Tuple, FixedString, Decimal, DateTime64, and conversions into them
+arr	1
+arr_lc	1
+arr_s	1
+d	1
+dt	1
+fs	1
+n	1
+ns	1
+t	1
+u	1
+arr_lc	1
+arr_s	1
+d	1
+dt	1
+fs	1
+n	1
+ns	1
+u	1
+Specialized codecs on the data substream
+arr	1	1
+dd	1	1
+lc	1	1
+n	1	1
+Dynamic and JSON are estimated with the layouts of a merged part, Map and Variant as a part stores them
+d	1
+j	1
+jl	1
+js	1
+1
+1	1	1	1	1	1
+1
+0	1
+1	1
+2	1
+8191	1
+8192	1
+10000	1
+16384	1
+m	1
+ml	1
+v	1
+1	1
+1	1	1
 GROUP BY: each group is estimated as the part it would be
+0	1
+1	1
+2	1
 0	1
 1	1
 2	1

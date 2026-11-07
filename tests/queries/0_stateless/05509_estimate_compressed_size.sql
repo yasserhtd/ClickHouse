@@ -188,6 +188,207 @@ WHERE database = currentDatabase() AND table = 't_ecs_wide' AND active AND colum
 
 DROP TABLE t_ecs_wide;
 
+SELECT 'Nullable, Array, Tuple, FixedString, Decimal, DateTime64, and conversions into them';
+
+DROP TABLE IF EXISTS t_ecs_types;
+CREATE TABLE t_ecs_types
+(
+    n Nullable(UInt32) CODEC(LZ4), arr Array(UInt32) CODEC(LZ4), arr_s Array(String) CODEC(LZ4), arr_lc Array(LowCardinality(String)) CODEC(LZ4),
+    t Tuple(UInt32, String) CODEC(LZ4), fs FixedString(8) CODEC(LZ4), d Decimal(18, 4) CODEC(LZ4), dt DateTime64(3) CODEC(LZ4),
+    u UInt32 CODEC(LZ4), ns Nullable(String) CODEC(LZ4), u64 UInt64 CODEC(LZ4), n64 Nullable(UInt64) CODEC(LZ4)
+)
+ENGINE = MergeTree ORDER BY tuple()
+SETTINGS min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0,
+         min_compress_block_size = 65536, max_compress_block_size = 65536, ratio_of_defaults_for_sparse_serialization = 1;
+
+-- The Nullable numbers are built as the function converts them, with the default value under NULL.
+INSERT INTO t_ecs_types
+SELECT
+    accurateCast(if(number % 7 = 0, NULL, number), 'Nullable(UInt32)'), [number, number + 1], [toString(number % 16), toString(number % 16)], [toString(number % 16), toString(number % 16)],
+    (number, toString(number % 16)), toFixedString(toString(number % 1000), 8), toDecimal64(number, 4), toDateTime64(number, 3),
+    number, if(number % 7 = 0, NULL, toString(number)), number, accurateCast(if(number % 7 = 0, NULL, number), 'Nullable(UInt64)')
+FROM numbers(3 * 8192);
+
+-- Each column as itself.
+SELECT column, column_data_compressed_bytes = estimate AS matches_on_disk_size
+FROM system.parts_columns
+INNER JOIN
+(
+    SELECT 'n' AS column, estimateCompressedSize('Nullable(UInt32)', 'LZ4', 65536)(n) AS estimate FROM t_ecs_types
+    UNION ALL SELECT 'arr', estimateCompressedSize('Array(UInt32)', 'LZ4', 65536)(arr) FROM t_ecs_types
+    UNION ALL SELECT 'arr_s', estimateCompressedSize('Array(String)', 'LZ4', 65536)(arr_s) FROM t_ecs_types
+    UNION ALL SELECT 'arr_lc', estimateCompressedSize('Array(LowCardinality(String))', 'LZ4', 65536)(arr_lc) FROM t_ecs_types
+    UNION ALL SELECT 't', estimateCompressedSize('Tuple(UInt32, String)', 'LZ4', 65536)(t) FROM t_ecs_types
+    UNION ALL SELECT 'fs', estimateCompressedSize('FixedString(8)', 'LZ4', 65536)(fs) FROM t_ecs_types
+    UNION ALL SELECT 'd', estimateCompressedSize('Decimal(18, 4)', 'LZ4', 65536)(d) FROM t_ecs_types
+    UNION ALL SELECT 'dt', estimateCompressedSize('DateTime64(3)', 'LZ4', 65536)(dt) FROM t_ecs_types
+    UNION ALL SELECT 'u', estimateCompressedSize('UInt32', 'LZ4', 65536)(u) FROM t_ecs_types
+    UNION ALL SELECT 'ns', estimateCompressedSize('Nullable(String)', 'LZ4', 65536)(ns) FROM t_ecs_types
+) AS estimates USING (column)
+WHERE database = currentDatabase() AND table = 't_ecs_types' AND active
+ORDER BY column;
+
+-- Converted: a wider Nullable number as a narrower one, a narrower number, a String array as a LowCardinality one and back, a
+-- number as a Decimal and as a DateTime64, a String as FixedString, a String as Nullable(String).
+SELECT column, column_data_compressed_bytes = estimate AS matches_on_disk_size
+FROM system.parts_columns
+INNER JOIN
+(
+    SELECT 'n' AS column, estimateCompressedSize('Nullable(UInt32)', 'LZ4', 65536)(n64) AS estimate FROM t_ecs_types
+    UNION ALL SELECT 'u', estimateCompressedSize('UInt32', 'LZ4', 65536)(u64) FROM t_ecs_types
+    UNION ALL SELECT 'arr_lc', estimateCompressedSize('Array(LowCardinality(String))', 'LZ4', 65536)(arr_s) FROM t_ecs_types
+    UNION ALL SELECT 'arr_s', estimateCompressedSize('Array(String)', 'LZ4', 65536)(arr_lc) FROM t_ecs_types
+    UNION ALL SELECT 'd', estimateCompressedSize('Decimal(18, 4)', 'LZ4', 65536)(u) FROM t_ecs_types
+    UNION ALL SELECT 'dt', estimateCompressedSize('DateTime64(3)', 'LZ4', 65536)(u) FROM t_ecs_types
+    UNION ALL SELECT 'fs', estimateCompressedSize('FixedString(8)', 'LZ4', 65536)(toString(u % 1000)) FROM t_ecs_types
+    UNION ALL SELECT 'ns', estimateCompressedSize('Nullable(String)', 'LZ4', 65536)(if(u % 7 = 0, NULL, toString(u))) FROM t_ecs_types
+) AS estimates USING (column)
+WHERE database = currentDatabase() AND table = 't_ecs_types' AND active
+ORDER BY column;
+
+DROP TABLE t_ecs_types;
+
+SELECT 'Specialized codecs on the data substream';
+
+SET allow_suspicious_low_cardinality_types = 1;
+
+DROP TABLE IF EXISTS t_ecs_t64;
+CREATE TABLE t_ecs_t64 (lc LowCardinality(UInt32) CODEC(T64), n Nullable(UInt32) CODEC(T64), arr Array(UInt32) CODEC(T64), dd UInt32 CODEC(DoubleDelta, LZ4), n64 Nullable(UInt64) CODEC(LZ4))
+ENGINE = MergeTree ORDER BY tuple()
+SETTINGS min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0,
+         min_compress_block_size = 65536, max_compress_block_size = 65536, ratio_of_defaults_for_sparse_serialization = 1;
+
+INSERT INTO t_ecs_t64 SELECT number % 1000, accurateCast(if(number % 7 = 0, NULL, number), 'Nullable(UInt32)'), [number, number + 1], number, accurateCast(if(number % 7 = 0, NULL, number), 'Nullable(UInt64)') FROM numbers(3 * 8192);
+
+-- As themselves, and converted from plain numbers.
+SELECT column, column_data_compressed_bytes = estimate AS matches_on_disk_size, column_data_compressed_bytes = converted AS matches_converted
+FROM system.parts_columns
+INNER JOIN
+(
+    SELECT 'lc' AS column, estimateCompressedSize('LowCardinality(UInt32)', 'T64', 65536)(lc) AS estimate, estimateCompressedSize('LowCardinality(UInt32)', 'T64', 65536)(dd % 1000) AS converted FROM t_ecs_t64
+    UNION ALL SELECT 'n', estimateCompressedSize('Nullable(UInt32)', 'T64', 65536)(n), estimateCompressedSize('Nullable(UInt32)', 'T64', 65536)(n64) FROM t_ecs_t64
+    UNION ALL SELECT 'arr', estimateCompressedSize('Array(UInt32)', 'T64', 65536)(arr), estimateCompressedSize('Array(UInt32)', 'T64', 65536)([dd, dd + 1]) FROM t_ecs_t64
+    UNION ALL SELECT 'dd', estimateCompressedSize('UInt32', 'DoubleDelta, LZ4', 65536)(dd), estimateCompressedSize('UInt32', 'DoubleDelta, LZ4', 65536)(toUInt64(dd)) FROM t_ecs_t64
+) AS estimates USING (column)
+WHERE database = currentDatabase() AND table = 't_ecs_t64' AND active
+ORDER BY column;
+
+DROP TABLE t_ecs_t64;
+
+SELECT 'Dynamic and JSON are estimated with the layouts of a merged part, Map and Variant as a part stores them';
+
+-- A part merged from two parts: its JSON shared data has the layout of merged parts, which a part written by one insert has not.
+DROP TABLE IF EXISTS t_ecs_layouts;
+CREATE TABLE t_ecs_layouts (d Dynamic CODEC(LZ4), j JSON CODEC(LZ4), js JSON(max_dynamic_paths = 4) CODEC(LZ4), jl JSON(a LowCardinality(String)) CODEC(LZ4), raw String CODEC(LZ4))
+ENGINE = MergeTree ORDER BY tuple()
+SETTINGS min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0, ratio_of_defaults_for_sparse_serialization = 1;
+
+INSERT INTO t_ecs_layouts
+SELECT
+    if(number % 3 = 0, number::Dynamic, toString(number)::Dynamic),
+    concat('{"a":', toString(number), ',"b":"', toString(number % 100), '","c', toString(number % 10), '":1}')::JSON,
+    concat('{"a":', toString(number), ',"b":"', toString(number % 100), '","c', toString(number % 10), '":1}')::JSON(max_dynamic_paths = 4),
+    concat('{"a":"', toString(number % 16), '"}')::JSON(a LowCardinality(String)),
+    concat('{"a":', toString(number), ',"b":"', toString(number % 100), '","c', toString(number % 10), '":1}')
+FROM numbers(8192);
+
+INSERT INTO t_ecs_layouts
+SELECT
+    if(number % 3 = 0, number::Dynamic, toString(number)::Dynamic),
+    concat('{"a":', toString(number), ',"b":"', toString(number % 100), '","c', toString(number % 10), '":1}')::JSON,
+    concat('{"a":', toString(number), ',"b":"', toString(number % 100), '","c', toString(number % 10), '":1}')::JSON(max_dynamic_paths = 4),
+    concat('{"a":"', toString(number % 16), '"}')::JSON(a LowCardinality(String)),
+    concat('{"a":', toString(number), ',"b":"', toString(number % 100), '","c', toString(number % 10), '":1}')
+FROM numbers(8192, 2048);
+
+OPTIMIZE TABLE t_ecs_layouts FINAL;
+
+SELECT column, column_data_compressed_bytes = estimate AS matches_on_disk_size
+FROM system.parts_columns
+INNER JOIN
+(
+    SELECT 'd' AS column, estimateCompressedSize('Dynamic', 'LZ4')(d) AS estimate FROM t_ecs_layouts
+    UNION ALL SELECT 'j', estimateCompressedSize('JSON', 'LZ4')(j) FROM t_ecs_layouts
+    UNION ALL SELECT 'js', estimateCompressedSize('JSON(max_dynamic_paths = 4)', 'LZ4')(js) FROM t_ecs_layouts
+    UNION ALL SELECT 'jl', estimateCompressedSize('JSON(a LowCardinality(String))', 'LZ4')(jl) FROM t_ecs_layouts
+) AS estimates USING (column)
+WHERE database = currentDatabase() AND table = 't_ecs_layouts' AND active
+ORDER BY column;
+
+-- The raw String column estimated as JSON: the size of the JSON column.
+SELECT column_data_compressed_bytes = estimate AS matches_on_disk_size
+FROM system.parts_columns
+CROSS JOIN (SELECT estimateCompressedSize('JSON', 'LZ4')(raw) AS estimate FROM t_ecs_layouts) AS estimates
+WHERE database = currentDatabase() AND table = 't_ecs_layouts' AND active AND column = 'j';
+
+-- Whatever the blocks of the query, also for LowCardinality inside JSON and Dynamic, whose types only the data reveals.
+SELECT
+    (SELECT estimateCompressedSize('Dynamic', 'LZ4')(d) FROM t_ecs_layouts SETTINGS max_block_size = 1000) = (SELECT estimateCompressedSize('Dynamic', 'LZ4')(d) FROM t_ecs_layouts),
+    (SELECT estimateCompressedSize('JSON', 'LZ4')(j) FROM t_ecs_layouts SETTINGS max_block_size = 1000) = (SELECT estimateCompressedSize('JSON', 'LZ4')(j) FROM t_ecs_layouts),
+    (SELECT estimateCompressedSize('JSON(max_dynamic_paths = 4)', 'LZ4')(js) FROM t_ecs_layouts SETTINGS max_block_size = 1000) = (SELECT estimateCompressedSize('JSON(max_dynamic_paths = 4)', 'LZ4')(js) FROM t_ecs_layouts),
+    (SELECT estimateCompressedSize('JSON(a LowCardinality(String))', 'LZ4')(jl) FROM t_ecs_layouts SETTINGS max_block_size = 1000) = (SELECT estimateCompressedSize('JSON(a LowCardinality(String))', 'LZ4')(jl) FROM t_ecs_layouts),
+    (SELECT estimateCompressedSize('JSON', 'LZ4')(raw) FROM t_ecs_layouts SETTINGS max_block_size = 1000) = (SELECT estimateCompressedSize('JSON', 'LZ4')(raw) FROM t_ecs_layouts),
+    (SELECT estimateCompressedSize('Dynamic', 'LZ4')(CAST([toLowCardinality(toString(number % 16))], 'Dynamic')) FROM numbers(10000) SETTINGS max_block_size = 1000)
+    = (SELECT estimateCompressedSize('Dynamic', 'LZ4')(CAST([toLowCardinality(toString(number % 16))], 'Dynamic')) FROM numbers(10000) SETTINGS max_block_size = 8192);
+
+-- Dynamic and JSON columns whose structure changes between blocks are written with the structure of the first block.
+SELECT estimateCompressedSize('Dynamic', 'LZ4', 65536)(d) > 0
+FROM (SELECT if(number < 100, number::Dynamic, toString(number)::Dynamic) AS d FROM numbers(300))
+SETTINGS max_block_size = 100;
+
+SELECT k, estimateCompressedSize('JSON', 'LZ4', 65536)(j) > 0
+FROM (SELECT number % 3 AS k, if(number < 100, '{"a":1}', concat('{"b', toString(number % 100), '":"x"}'))::JSON AS j FROM numbers(300))
+GROUP BY k ORDER BY k
+SETTINGS max_block_size = 100;
+
+-- The serialization of the shared typed paths of JSON ends the data stream of every granule with `next` itself. With NONE, a
+-- compressed block is never smaller than its data, also when `next` finds the buffer exactly full (8192 rows of 8 bytes).
+SELECT rows, estimateCompressedSize('JSON(SHARED a UInt64)', 'NONE')(j) > rows * 8
+FROM (SELECT number, CAST(concat('{"a":', toString(number), '}'), 'JSON(SHARED a UInt64)') AS j FROM numbers(16384))
+ARRAY JOIN [8191, 8192, 10000, 16384] AS rows
+WHERE number < rows
+GROUP BY rows
+ORDER BY rows;
+
+DROP TABLE t_ecs_layouts;
+
+-- Map and Variant match the part one insert writes; a part merged from several is a few hundred bytes larger.
+DROP TABLE IF EXISTS t_ecs_layouts0;
+CREATE TABLE t_ecs_layouts0 (m Map(String, UInt64) CODEC(LZ4), v Variant(UInt64, String) CODEC(LZ4), ml Map(LowCardinality(String), UInt64) CODEC(LZ4))
+ENGINE = MergeTree ORDER BY tuple()
+SETTINGS min_bytes_for_wide_part = 0, index_granularity = 8192, index_granularity_bytes = 0, ratio_of_defaults_for_sparse_serialization = 1;
+
+INSERT INTO t_ecs_layouts0
+SELECT
+    map(concat('k', toString(number % 7)), number, concat('k', toString(number % 11)), number * 2),
+    if(number % 2 = 0, number::Variant(UInt64, String), toString(number)::Variant(UInt64, String)),
+    map(concat('k', toString(number % 7)), number, concat('k', toString(number % 11)), number * 2)
+FROM numbers(8192 + 2048);
+
+SELECT column, column_data_compressed_bytes = estimate AS matches_on_disk_size
+FROM system.parts_columns
+INNER JOIN
+(
+    SELECT 'm' AS column, estimateCompressedSize('Map(String, UInt64)', 'LZ4')(m) AS estimate FROM t_ecs_layouts0
+    UNION ALL SELECT 'v', estimateCompressedSize('Variant(UInt64, String)', 'LZ4')(v) FROM t_ecs_layouts0
+    UNION ALL SELECT 'ml', estimateCompressedSize('Map(LowCardinality(String), UInt64)', 'LZ4')(ml) FROM t_ecs_layouts0
+) AS estimates USING (column)
+WHERE database = currentDatabase() AND table = 't_ecs_layouts0' AND active
+ORDER BY column;
+
+-- The Map converted: as a Map with LowCardinality keys, and the other way round.
+SELECT
+    estimateCompressedSize('Map(LowCardinality(String), UInt64)', 'LZ4')(m) = estimateCompressedSize('Map(LowCardinality(String), UInt64)', 'LZ4')(ml),
+    estimateCompressedSize('Map(String, UInt64)', 'LZ4')(ml) = estimateCompressedSize('Map(String, UInt64)', 'LZ4')(m)
+FROM t_ecs_layouts0;
+
+SELECT
+    (SELECT estimateCompressedSize('Map(String, UInt64)', 'LZ4')(m) FROM t_ecs_layouts0 SETTINGS max_block_size = 1000) = (SELECT estimateCompressedSize('Map(String, UInt64)', 'LZ4')(m) FROM t_ecs_layouts0),
+    (SELECT estimateCompressedSize('Variant(UInt64, String)', 'LZ4')(v) FROM t_ecs_layouts0 SETTINGS max_block_size = 1000) = (SELECT estimateCompressedSize('Variant(UInt64, String)', 'LZ4')(v) FROM t_ecs_layouts0),
+    (SELECT estimateCompressedSize('Map(LowCardinality(String), UInt64)', 'LZ4')(ml) FROM t_ecs_layouts0 SETTINGS max_block_size = 1000) = (SELECT estimateCompressedSize('Map(LowCardinality(String), UInt64)', 'LZ4')(ml) FROM t_ecs_layouts0);
+
+DROP TABLE t_ecs_layouts0;
+
 SELECT 'GROUP BY: each group is estimated as the part it would be';
 
 SELECT k, column_data_compressed_bytes = estimate AS matches_on_disk_size
@@ -200,6 +401,13 @@ SELECT k, column_data_compressed_bytes = estimate AS matches_on_disk_size
 FROM system.parts_columns
 INNER JOIN (SELECT k, estimateCompressedSize('IPv6', 'LZ4', 65536)(ip4) AS estimate FROM t_ecs GROUP BY k) AS estimates ON toUInt32(partition) = k
 WHERE database = currentDatabase() AND table = 't_ecs_parts' AND active AND column = 'ip6'
+ORDER BY k;
+
+-- A group of a plain type is serialized in batches of rows; its size is still that of its part, whatever the block size.
+SELECT k, column_data_compressed_bytes = estimate AS matches_on_disk_size
+FROM system.parts_columns
+INNER JOIN (SELECT k, estimateCompressedSize('IPv4', 'LZ4', 65536)(ip4) AS estimate FROM t_ecs GROUP BY k SETTINGS max_block_size = 1000) AS estimates ON toUInt32(partition) = k
+WHERE database = currentDatabase() AND table = 't_ecs_parts' AND active AND column = 'ip4'
 ORDER BY k;
 
 SELECT 'States and combinators';
