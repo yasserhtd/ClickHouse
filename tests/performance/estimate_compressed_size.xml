@@ -1,0 +1,15 @@
+<test iceberg="0">
+    <create_query>CREATE TABLE t_ecs_perf (k UInt32, s String, lc LowCardinality(String), ip4 IPv4) ENGINE = MergeTree ORDER BY tuple() SETTINGS min_bytes_for_wide_part = 0</create_query>
+
+    <fill_query>INSERT INTO t_ecs_perf SELECT number % 1000, toString(number % 1000), toString(number % 1000), toIPv4(number * 7919) FROM numbers(10000000)</fill_query>
+
+    <query>SELECT estimateCompressedSize('LZ4', 65536)(s) FROM t_ecs_perf FORMAT Null</query>
+    <query>SELECT estimateCompressedSize('LZ4', 65536, 'LowCardinality(String)')(s) FROM t_ecs_perf FORMAT Null</query>
+    <query>SELECT estimateCompressedSize('LZ4', 65536, 'LowCardinality(String)')(lc) FROM t_ecs_perf FORMAT Null</query>
+    <query>SELECT estimateCompressedSize('LZ4', 65536, 'IPv6')(ip4) FROM t_ecs_perf FORMAT Null</query>
+    <query>SELECT k, estimateCompressedSize('LZ4', 65536)(s) FROM t_ecs_perf GROUP BY k FORMAT Null</query>
+    <query>SELECT k, estimateCompressedSize('LZ4', 65536, 'LowCardinality(String)')(s) FROM t_ecs_perf GROUP BY k FORMAT Null</query>
+    <query>SELECT estimateCompressedSize('LZ4', 65536)(s) FROM t_ecs_perf SETTINGS max_block_size = 1000 FORMAT Null</query>
+
+    <drop_query>DROP TABLE IF EXISTS t_ecs_perf</drop_query>
+</test>

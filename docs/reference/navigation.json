@@ -560,6 +560,7 @@
                 "reference/functions/aggregate-functions/distinctJSONPaths",
                 "reference/functions/aggregate-functions/distinctJSONPathsAndTypes",
                 "reference/functions/aggregate-functions/entropy",
+                "reference/functions/aggregate-functions/estimateCompressedSize",
                 "reference/functions/aggregate-functions/estimateCompressionRatio",
                 "reference/functions/aggregate-functions/exponentialMovingAverage",
                 "reference/functions/aggregate-functions/exponentialTimeDecayedAvg",

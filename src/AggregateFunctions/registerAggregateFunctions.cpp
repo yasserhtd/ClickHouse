@@ -16,6 +16,7 @@ void registerAggregateFunctionCount(AggregateFunctionFactory &);
 void registerAggregateFunctionDeltaSum(AggregateFunctionFactory &);
 void registerAggregateFunctionDeltaSumTimestamp(AggregateFunctionFactory &);
 void registerAggregateFunctionEstimateCompressionRatio(AggregateFunctionFactory & factory);
+void registerAggregateFunctionEstimateCompressedSize(AggregateFunctionFactory & factory);
 void registerAggregateFunctionHierarchicalKMeans(AggregateFunctionFactory &);
 void registerAggregateFunctionGroupArray(AggregateFunctionFactory &);
 void registerAggregateFunctionGroupArraySorted(AggregateFunctionFactory & factory);
@@ -132,6 +133,7 @@ void registerAggregateFunctions()
         registerAggregateFunctionDeltaSum(factory);
         registerAggregateFunctionDeltaSumTimestamp(factory);
         registerAggregateFunctionEstimateCompressionRatio(factory);
+        registerAggregateFunctionEstimateCompressedSize(factory);
         registerAggregateFunctionHierarchicalKMeans(factory);
         registerAggregateFunctionGroupArray(factory);
         registerAggregateFunctionGroupArraySorted(factory);
