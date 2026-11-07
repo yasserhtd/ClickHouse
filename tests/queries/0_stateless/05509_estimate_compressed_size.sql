@@ -509,6 +509,22 @@ INNER JOIN (SELECT k, estimateCompressedSize('IPv4', 'LZ4', 65536)(ip4) AS estim
 WHERE database = currentDatabase() AND table = 't_ecs_parts' AND active AND column = 'ip4'
 ORDER BY k;
 
+-- A group of a LowCardinality column, whose rows share a dictionary, is sized by the bytes the column takes, not by the bytes
+-- of its decoded values: eight distinct 4000-byte strings make one granule of 8192 rows, as in the part.
+DROP TABLE IF EXISTS t_ecs_lc_groups;
+CREATE TABLE t_ecs_lc_groups (k UInt8, lc LowCardinality(String) CODEC(LZ4)) ENGINE = MergeTree PARTITION BY k ORDER BY tuple()
+SETTINGS min_bytes_for_wide_part = 0, ratio_of_defaults_for_sparse_serialization = 1;
+
+INSERT INTO t_ecs_lc_groups SELECT number % 2, repeat(char(97 + number % 8), 4000) FROM numbers(16384);
+
+SELECT k, column_data_compressed_bytes = estimate AS matches_on_disk_size
+FROM system.parts_columns
+INNER JOIN (SELECT k, estimateCompressedSize('LowCardinality(String)', 'LZ4')(lc) AS estimate FROM t_ecs_lc_groups GROUP BY k) AS estimates ON toUInt8(partition) = k
+WHERE database = currentDatabase() AND table = 't_ecs_lc_groups' AND active AND column = 'lc'
+ORDER BY k;
+
+DROP TABLE t_ecs_lc_groups;
+
 SELECT 'States and combinators';
 
 -- -State and -Merge round-trip. The states of several groups merge into the sum of their sizes, as the parts they would be.

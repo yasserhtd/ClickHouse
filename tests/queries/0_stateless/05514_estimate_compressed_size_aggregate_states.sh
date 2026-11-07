@@ -44,3 +44,23 @@ SELECT k, e = (SELECT estimateCompressedSize('String', 'LZ4')(s) FROM t_ecs_widt
 FROM (SELECT k, estimateCompressedSize('String', 'LZ4')(s) AS e FROM t_ecs_widths GROUP BY k)
 ORDER BY k;
 " -- --merge_tree.index_granularity_bytes=131072
+
+# Aggregation in order gives a state a range of a block: the range sizes its granules, not the whole block it shares with
+# other groups. Short and long strings in one block of one part, grouped either way, give the size of their own parts.
+$CLICKHOUSE_LOCAL --multiquery --query "
+SET max_threads = 1, max_block_size = 8192;
+DROP TABLE IF EXISTS t_ecs_ranges;
+DROP TABLE IF EXISTS t_ecs_ranges_parts;
+CREATE TABLE t_ecs_ranges (k UInt8, s String CODEC(LZ4)) ENGINE = MergeTree ORDER BY k
+SETTINGS min_bytes_for_wide_part = 0, ratio_of_defaults_for_sparse_serialization = 1;
+INSERT INTO t_ecs_ranges SELECT number >= 4096, repeat('x', if(number < 4096, 10, 200)) FROM numbers(8192);
+CREATE TABLE t_ecs_ranges_parts (k UInt8, s String CODEC(LZ4)) ENGINE = MergeTree PARTITION BY k ORDER BY tuple()
+SETTINGS min_bytes_for_wide_part = 0, ratio_of_defaults_for_sparse_serialization = 1;
+INSERT INTO t_ecs_ranges_parts SELECT * FROM t_ecs_ranges;
+SELECT k, column_data_compressed_bytes = ordinary AS matches_ordinary, column_data_compressed_bytes = in_order AS matches_in_order
+FROM system.parts_columns
+INNER JOIN (SELECT k, estimateCompressedSize('String', 'LZ4')(s) AS ordinary FROM t_ecs_ranges GROUP BY k SETTINGS optimize_aggregation_in_order = 0) AS o ON toUInt8(partition) = o.k
+INNER JOIN (SELECT k, estimateCompressedSize('String', 'LZ4')(s) AS in_order FROM t_ecs_ranges GROUP BY k SETTINGS optimize_aggregation_in_order = 1) AS i ON o.k = i.k
+WHERE table = 't_ecs_ranges_parts' AND active AND column = 's'
+ORDER BY k;
+" -- --merge_tree.index_granularity_bytes=131072

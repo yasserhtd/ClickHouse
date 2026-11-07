@@ -87,6 +87,8 @@ GROUP BY: each group is estimated as the part it would be
 0	1
 1	1
 2	1
+0	1
+1	1
 States and combinators
 1
 1

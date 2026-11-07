@@ -29,6 +29,7 @@
 #include <Interpreters/Context.h>
 #include <Parsers/ExpressionElementParsers.h>
 #include <Parsers/parseQuery.h>
+#include <Storages/MergeTree/MergeTreeIndexGranularity.h>
 #include <base/defines.h>
 #include <base/types.h>
 #include <Common/Arena.h>
@@ -337,7 +338,9 @@ private:
     /// completes. Either way the result does not depend on how the query splits the rows into blocks.
     void addRows(Data & data_ref, const IColumn & rows, size_t offset, size_t limit) const
     {
-        const size_t granule_rows = estimator.granuleRows(rows);
+        /// The rows of [offset, offset + limit) are the block of this state (aggregation in order gives a state a range of a
+        /// block), so they size its granules.
+        const size_t granule_rows = estimator.granuleRows(limit, bytesOfRows(rows, offset, limit));
         if (!buffer_partial_granules && !rows.isSparse())
         {
             flushBuffer(data_ref);
@@ -448,6 +451,28 @@ private:
         addRows(data(place), *rows, offset, limit);
     }
 
+    /// Whether the bytes of some rows of `column` are the sum of the bytes of each (`IColumn::byteSizeAt`), as for numbers and
+    /// strings, or only known for the column as a whole, as the writer counts them (`getColumnSizeForGranularity`): the rows
+    /// of a `LowCardinality` column share a dictionary, the defaults of a sparse column take no room, the states of an aggregate
+    /// function live in an arena. Those rows get their share of the column's bytes.
+    bool bytesAreOfRows(const IColumn & column) const { return !buffer_partial_granules && !column.isSparse(); }
+
+    /// The bytes of the rows of [offset, offset + limit) of `column`, as the writer would count them for a block of those rows.
+    size_t bytesOfRows(const IColumn & column, size_t offset, size_t limit) const
+    {
+        if (limit == column.size())
+            return getColumnSizeForGranularity(column);
+        if (!bytesAreOfRows(column))
+            return getColumnSizeForGranularity(column) * limit / column.size();
+        if (column.isFixedAndContiguous())
+            return column.sizeOfValueIfFixed() * limit;
+
+        size_t bytes = 0;
+        for (size_t i = offset; i < offset + limit; ++i)
+            bytes += column.byteSizeAt(i);
+        return bytes;
+    }
+
     /// Sizes the granules of every state that gets rows of this block by those rows, as the writer sizes the granules of a part
     /// by the rows of the block it writes into it: a group is a part, and the rows a block gives it are its block, as the rows a
     /// block gives a partition are (`MergeTreeDataWriter` splits a block by partition before sizing). A granule the state has
@@ -455,7 +480,8 @@ private:
     void sizeGranulesByBlock(
         size_t row_begin, size_t row_end, AggregateDataPtr * places, size_t place_offset, const IColumn & column, const UInt8 * flags) const
     {
-        const size_t fixed_size = column.isFixedAndContiguous() ? column.sizeOfValueIfFixed() : 0;
+        const bool of_rows = bytesAreOfRows(column);
+        const size_t fixed_size = of_rows && column.isFixedAndContiguous() ? column.sizeOfValueIfFixed() : 0;
         PODArray<AggregateDataPtr> touched;
         for (size_t i = row_begin; i < row_end; ++i)
         {
@@ -465,13 +491,16 @@ private:
             if (data_ref.block_rows == 0)
                 touched.push_back(places[i] + place_offset);
             ++data_ref.block_rows;
-            data_ref.block_bytes += fixed_size ? fixed_size : column.byteSizeAt(i);
+            if (of_rows)
+                data_ref.block_bytes += fixed_size ? fixed_size : column.byteSizeAt(i);
         }
 
+        const size_t column_bytes = of_rows ? 0 : getColumnSizeForGranularity(column);
         for (AggregateDataPtr place : touched)
         {
             Data & data_ref = data(place);
-            data_ref.block_granule_rows = estimator.granuleRows(data_ref.block_rows, data_ref.block_bytes);
+            const size_t bytes = of_rows ? data_ref.block_bytes : column_bytes * data_ref.block_rows / column.size();
+            data_ref.block_granule_rows = estimator.granuleRows(data_ref.block_rows, bytes);
             data_ref.block_rows = 0;
             data_ref.block_bytes = 0;
             /// A buffer that holds a batch of a granule, not the granule, takes the size at its next flush (see `flushBuffer`).
