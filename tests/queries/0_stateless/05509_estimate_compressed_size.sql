@@ -174,16 +174,18 @@ SELECT
     (SELECT estimateCompressedSize('LZ4', 65536, 'LowCardinality(UInt32)')(toLowCardinality(toUInt32(number % 16))) FROM numbers(10000) SETTINGS max_block_size = 1000)
     = (SELECT estimateCompressedSize('LZ4', 65536, 'LowCardinality(UInt32)')(toUInt32(number % 16)) FROM numbers(10000) SETTINGS max_block_size = 8192);
 
--- Wide rows: a block of 8192 rows that holds more bytes than index_granularity_bytes is one granule, as the writer sizes it.
+-- Wide rows: a block of 8192 rows that holds more bytes than index_granularity_bytes is one granule, as the writer sizes it. With
+-- the default compressed block sizes, a block ends at a granule boundary once it holds min_compress_block_size bytes, so the
+-- granule boundaries show in the size.
 DROP TABLE IF EXISTS t_ecs_wide;
 CREATE TABLE t_ecs_wide (s String CODEC(LZ4)) ENGINE = MergeTree ORDER BY tuple()
-SETTINGS min_bytes_for_wide_part = 0, min_compress_block_size = 65536, max_compress_block_size = 65536, ratio_of_defaults_for_sparse_serialization = 1;
+SETTINGS min_bytes_for_wide_part = 0, ratio_of_defaults_for_sparse_serialization = 1;
 
 INSERT INTO t_ecs_wide SELECT repeat(char(97 + number % 26), 2000) FROM numbers(8192);
 
 SELECT column_data_compressed_bytes = estimate AS matches_on_disk_size
 FROM system.parts_columns
-CROSS JOIN (SELECT estimateCompressedSize('LZ4', 65536)(s) AS estimate FROM t_ecs_wide) AS estimates
+CROSS JOIN (SELECT estimateCompressedSize('LZ4')(s) AS estimate FROM t_ecs_wide) AS estimates
 WHERE database = currentDatabase() AND table = 't_ecs_wide' AND active AND column = 's';
 
 DROP TABLE t_ecs_wide;
